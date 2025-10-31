@@ -1,12 +1,21 @@
-
         const supabaseUrl = "https://vhurelhciwirynuqpnjt.supabase.co";
         const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZodXJlbGhjaXdpcnludXFwbmp0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAzOTg2NDMsImV4cCI6MjA2NTk3NDY0M30.g6-dnlvk3-svrzvw0Ce9vcSdXn3l9pQVocr_hQDAJIU";
         const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
 
         let products = [];
+        let cart = [];
+        let transactions = [];
+        let lastTransaction = null;
+        let currentCategory = 'all';
+
         let isLoggedIn = false;
         let currentAdmin = null;
         let currentReceiptPhoneNumber = null;
+
+        // Variabel untuk state cleanup
+        let timeInterval = null;
+        let orderBadgeInterval = null;
+        let productSubscription = null;
 
         // Fungsi untuk reset tombol login ke keadaan semula
         function resetLoginButton() {
@@ -14,9 +23,15 @@
             const loginButtonText = document.getElementById('loginButtonText');
             const loginSpinner = document.getElementById('loginSpinner');
 
-            loginButton.disabled = false;
-            loginButtonText.textContent = 'Login';
-            loginSpinner.classList.add('hidden');
+            if (loginButton) {
+                loginButton.disabled = false;
+            }
+            if (loginButtonText) {
+                loginButtonText.textContent = 'Login';
+            }
+            if (loginSpinner) {
+                loginSpinner.classList.add('hidden');
+            }
         }
 
         // Fungsi untuk cek status login
@@ -33,7 +48,7 @@
                 if (session && session.user) {
                     const { data: adminData, error: adminError } = await supabase
                         .from('admin_role')
-                        .select('email, name, status')
+                        .select('email, name, status, role') // Tambahkan 'role' jika ada
                         .eq('email', session.user.email)
                         .eq('status', 'active')
                         .single();
@@ -48,6 +63,7 @@
                     isLoggedIn = true;
                     currentAdmin = adminData;
                     document.getElementById('loginModal').classList.add('hidden');
+                    document.body.classList.remove('overflow-hidden'); // <-- FIX: Hapus overflow-hidden saat login
                     document.getElementById('userName').textContent = adminData.name || session.user.email;
 
                     initializeApp();
@@ -88,7 +104,7 @@
                 if (data.user && data.user.email_confirmed_at) {
                     const { data: adminData, error: adminError } = await supabase
                         .from('admin_role')
-                        .select('email, name, status')
+                        .select('email, name, status, role') // Tambahkan 'role' jika ada
                         .eq('email', data.user.email)
                         .eq('status', 'active')
                         .single();
@@ -104,6 +120,7 @@
                     isLoggedIn = true;
                     currentAdmin = adminData;
                     document.getElementById('loginModal').classList.add('hidden');
+                    document.body.classList.remove('overflow-hidden'); // <-- FIX: Hapus overflow-hidden saat login
                     document.getElementById('userName').textContent = adminData.name || data.user.email;
                     showNotification(`Login berhasil! Selamat datang ${adminData.name || data.user.email}`, 'success');
 
@@ -135,19 +152,44 @@
                 logoutSpinner.classList.add('hidden');
 
                 await supabase.auth.signOut();
-                localStorage.removeItem('loggedInUser');
                 isLoggedIn = false;
                 currentAdmin = null;
-                document.getElementById('loginModal').classList.remove('hidden');
-                document.getElementById('profileMenu').classList.add('hidden');
 
+                // --- FIX: STATE CLEANUP ---
+                // Hentikan semua timer
+                if (timeInterval) {
+                    clearInterval(timeInterval);
+                    timeInterval = null;
+                }
+                if (orderBadgeInterval) {
+                    clearInterval(orderBadgeInterval);
+                    orderBadgeInterval = null;
+                }
+                // Hentikan subscription realtime
+                if (productSubscription) {
+                    await supabase.removeChannel(productSubscription);
+                    productSubscription = null;
+                }
+
+                // Reset data state
                 cart = [];
-                renderCart();
+                products = [];
+                transactions = [];
+                lastTransaction = null;
+                // --- END FIX ---
+
+                renderCart(); // Update UI keranjang (kosong)
+                renderProducts(); // Update UI produk (kosong)
+
+                showLoginModal(); // <-- FIX: Panggil fungsi ini agar konsisten (menampilkan modal + tambah overflow-hidden)
+                document.getElementById('profileMenu').classList.add('hidden');
 
                 resetLoginButton();
                 showNotification('Anda telah logout', 'info');
             } catch (error) {
                 console.error('Logout error:', error);
+                // Pastikan tombol reset jika ada error
+                resetLoginButton();
             }
         }
 
@@ -155,13 +197,18 @@
         async function initializeApp() {
             try {
                 updateTime();
-                setInterval(updateTime, 1000);
+                // FIX: Hapus timer lama jika ada sebelum membuat yang baru
+                if (timeInterval) clearInterval(timeInterval);
+                timeInterval = setInterval(updateTime, 1000);
 
                 await loadProducts();
-                subscribeProducts();
-                setupEventListeners();
+                await subscribeProducts(); // Tunggu subscription selesai
+                setupEventListeners(); // Setup listener (dibuat aman untuk dipanggil ulang)
+
                 await updateOnlineOrdersBadge();
-                setInterval(updateOnlineOrdersBadge, 5000);
+                // FIX: Hapus timer lama jika ada sebelum membuat yang baru
+                if (orderBadgeInterval) clearInterval(orderBadgeInterval);
+                orderBadgeInterval = setInterval(updateOnlineOrdersBadge, 5000);
             } catch (error) {
                 console.error('Error initializing app:', error);
             }
@@ -214,6 +261,13 @@
         supabase.auth.onAuthStateChange((event, session) => {
             if (session) {
                 document.getElementById('loginModal').classList.add('hidden');
+                // Tidak memanggil initializeApp di sini untuk menghindari race condition
+                // Biarkan checkLoginStatus yang mengurus
+            } else {
+                // Jika session tidak ada (logout dari tab lain?), paksa tampilkan modal
+                if (!isLoggedIn) { // Hanya jika kita belum tahu kita logout
+                    showLoginModal();
+                }
             }
         });
 
@@ -221,6 +275,7 @@
         // Cek status login saat halaman dimuat
         document.addEventListener('DOMContentLoaded', function () {
             checkLoginStatus();
+            setupQrisMobileListeners(); // Setup listener modal QRIS mobile
         });
 
         // Ambil produk dari Supabase
@@ -242,10 +297,20 @@
         }
 
         // Realtime listener
-        function subscribeProducts() {
+        async function subscribeProducts() {
             if (!isLoggedIn) return;
 
-            supabase
+            // FIX: Hapus channel lama sebelum membuat yang baru
+            if (productSubscription) {
+                try {
+                    await supabase.removeChannel(productSubscription);
+                } catch (error) {
+                    console.warn("Error removing old channel: ", error);
+                }
+                productSubscription = null;
+            }
+
+            productSubscription = supabase
                 .channel("public:product_list")
                 .on(
                     "postgres_changes",
@@ -267,7 +332,14 @@
                         renderProducts();
                     }
                 )
-                .subscribe();
+                .subscribe((status, error) => {
+                    if (status === 'SUBSCRIBED') {
+                        console.log('✅ Realtime product subscription active');
+                    }
+                    if (status === 'CHANNEL_ERROR' || error) {
+                        console.error('Realtime subscription error:', error);
+                    }
+                });
         }
 
         function sortProducts() {
@@ -286,11 +358,6 @@
                 return (a.name || "").localeCompare(b.name || "", "id-ID", { sensitivity: "base" });
             });
         }
-
-        let cart = [];
-        let currentCategory = 'all';
-        let lastTransaction = null;
-        let transactions = [];
 
         // PERBAIKAN: Fungsi untuk menyimpan order ke tabel orders di Supabase
         async function saveOrderToDatabase(transaction) {
@@ -408,7 +475,7 @@
 
                 console.log(`✅ ${orderItems.length} item berhasil disimpan ke order_items`, itemsResult);
 
-                // PERBAIKAN 3: Kurangi stok produk setelah checkout
+                // Kurangi stok produk setelah checkout
                 await updateProductStock(orderItems);
 
                 showNotification('Transaksi dan detail barang berhasil disimpan', 'success');
@@ -421,7 +488,7 @@
             }
         }
 
-        // PERBAIKAN 3: Fungsi untuk mengurangi stok produk setelah checkout
+        // Fungsi untuk mengurangi stok produk setelah checkout (untuk offline/online)
         async function updateProductStock(orderItems) {
             try {
                 for (const item of orderItems) {
@@ -438,7 +505,12 @@
                     }
 
                     // Hitung stok baru
-                    const newStock = product.stock - item.quantity;
+                    let newStock = product.stock - item.quantity;
+                    if (newStock < 0) {
+                        console.warn(`Stock for product ${item.product_id} would be negative. Setting to 0.`);
+                        newStock = 0;
+                    }
+
 
                     // Update stok di database
                     const { error: updateError } = await supabase
@@ -506,7 +578,19 @@
 
 // GANTI seluruh renderProducts() dengan ini (keep only this one)
 function renderProducts() {
-  if (!isLoggedIn) return;
+  if (!isLoggedIn) {
+      // FIX: Tampilkan pesan jika belum login
+      const grid = document.getElementById('productsGrid');
+      if (grid) {
+          grid.innerHTML = `
+            <div class="col-span-full text-center py-8">
+                <i class="fas fa-lock text-3xl text-gray-400 mb-3"></i>
+                <p class="text-gray-600 text-sm">Silakan login untuk melihat produk</p>
+            </div>
+        `;
+      }
+      return;
+  }
 
   try {
     const filteredProducts = currentCategory === 'all'
@@ -517,8 +601,8 @@ function renderProducts() {
     const preloadPromises = filteredProducts.map(product => {
       const key = product.image; // <-- pastikan objek product punya property 'image'
       if (!key) return Promise.resolve();
-      const cached = localStorage.getItem(key);
-      if (cached) return Promise.resolve();
+      //   const cached = localStorage.getItem(key); // Caching dinonaktifkan sementara untuk simplifikasi
+      //   if (cached) return Promise.resolve();
       return fetch(key)
         .then(res => {
           if (!res.ok) throw new Error('Network response not ok');
@@ -526,12 +610,12 @@ function renderProducts() {
         })
         .then(blob => {
           const url = URL.createObjectURL(blob);
-          try {
-            localStorage.setItem(key, url);
-          } catch (err) {
-            // localStorage bisa penuh - jangan crash
-            console.warn('localStorage penuh, skip menyimpan gambar:', err);
-          }
+          //   try {
+          //     localStorage.setItem(key, url);
+          //   } catch (err) {
+          //     // localStorage bisa penuh - jangan crash
+          //     console.warn('localStorage penuh, skip menyimpan gambar:', err);
+          //   }
         })
         .catch(err => {
           console.warn('Gagal preload gambar', key, err);
@@ -570,7 +654,7 @@ function renderProducts() {
                 return `
         <div class="product-card" onclick="addToCartWithAnimation(${product.id}, this)">
             <div class="product-image-wrapper">
-                <img src="${product.image}" alt="${product.name}" class="product-image-fixed">
+                <img src="${product.image}" alt="${product.name}" class="product-image-fixed" loading="lazy">
             </div>
             <div class="product-content">
                 <h3 class="product-name">${product.name}</h3>
@@ -586,6 +670,8 @@ function renderProducts() {
             const notification = document.getElementById('notification');
             const icon = document.getElementById('notificationIcon');
             const messageEl = document.getElementById('notificationMessage');
+            if (!notification || !icon || !messageEl) return;
+
             if (type === 'success') {
                 icon.innerHTML = '<i class="fas fa-check-circle text-green-500 text-sm"></i>';
             } else if (type === 'error') {
@@ -604,7 +690,46 @@ function renderProducts() {
             }, 3000);
         }
 
+        // Variabel untuk mencegah setup listener berulang kali
+        let listenersInitialized = false;
+
+        // Handler untuk klik di luar menu (agar bisa di-remove saat logout)
+        function handleDocumentClick(e) {
+            const profileMenu = document.getElementById('profileMenu');
+            const profileBtn = document.getElementById('profileBtn');
+            const profileContainer = document.querySelector('.profile-menu-container');
+
+            if (profileMenu && profileBtn && profileContainer && !profileContainer.contains(e.target)) {
+                profileMenu.classList.add('hidden');
+            }
+
+            const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
+            const onlineOrdersBtn = document.getElementById('onlineOrdersBtn');
+            if (onlineOrdersMenu && onlineOrdersBtn && !onlineOrdersMenu.contains(e.target) && !onlineOrdersBtn.contains(e.target)) {
+                onlineOrdersMenu.classList.remove('show');
+                setTimeout(() => {
+                    onlineOrdersMenu.classList.add('hidden');
+                }, 300);
+            }
+
+            const cartModal = document.getElementById('cartModal');
+            const cartBtn = document.getElementById('cartBtn');
+            if (cartModal && cartBtn && !cartModal.contains(e.target) && !cartBtn.contains(e.target)) {
+                cartModal.classList.remove('show');
+            }
+
+            const searchInfo = document.getElementById('searchInfo');
+            if(searchInfo) {
+                searchInfo.classList.add('hidden');
+            }
+        }
+
+
         function setupEventListeners() {
+            // FIX: Gunakan flag agar listener hanya di-setup sekali
+            // (Kecuali yang perlu di-refresh)
+            if (listenersInitialized) return;
+
             // Cart modal toggle
             document.getElementById('cartBtn').addEventListener('click', function (e) {
                 if (!isLoggedIn) {
@@ -689,34 +814,13 @@ function renderProducts() {
             });
 
             // Close menus when clicking outside
-            document.addEventListener('click', function (e) {
-                const profileMenu = document.getElementById('profileMenu');
-                const profileBtn = document.getElementById('profileBtn');
-                const profileContainer = document.querySelector('.profile-menu-container');
+            // FIX: Hapus listener lama (jika ada) sebelum menambah baru
+            document.removeEventListener('click', handleDocumentClick);
+            document.addEventListener('click', handleDocumentClick);
 
-                if (profileMenu && profileBtn && !profileContainer.contains(e.target)) {
-                    profileMenu.classList.add('hidden');
-                }
-
-                const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
-                const onlineOrdersBtn = document.getElementById('onlineOrdersBtn');
-                if (onlineOrdersMenu && onlineOrdersBtn && !onlineOrdersMenu.contains(e.target) && !onlineOrdersBtn.contains(e.target)) {
-                    onlineOrdersMenu.classList.remove('show');
-                    setTimeout(() => {
-                        onlineOrdersMenu.classList.add('hidden');
-                    }, 300);
-                }
-
-                const cartModal = document.getElementById('cartModal');
-                const cartBtn = document.getElementById('cartBtn');
-                if (cartModal && cartBtn && !cartModal.contains(e.target) && !cartBtn.contains(e.target)) {
-                    cartModal.classList.remove('show');
-                }
-
-                document.getElementById('searchInfo').classList.add('hidden');
-            });
 
             // Category buttons
+            // FIX: Hanya satu blok untuk category-btn
             document.querySelectorAll('.category-btn').forEach(btn => {
                 btn.addEventListener('click', function () {
                     document.querySelectorAll('.category-btn').forEach(b => {
@@ -725,8 +829,11 @@ function renderProducts() {
 
                     this.classList.add('active');
                     currentCategory = this.dataset.category;
+
+                    // Reset pencarian dan render produk berdasarkan kategori baru
                     document.getElementById('searchProduct').value = '';
                     document.getElementById('clearSearch').classList.add('hidden');
+                    document.getElementById('searchInfo').classList.add('hidden');
                     renderProducts();
 
                     if (window.innerWidth <= 768) {
@@ -735,10 +842,11 @@ function renderProducts() {
                         tooltip.classList.add('show');
                         setTimeout(() => {
                             tooltip.classList.remove('show');
-                        }, 500);
+                        }, 2000);
                     }
                 });
             });
+
 
             // Filter toggle buttons (desktop and mobile)
             const filterToggle = document.getElementById('filterToggle');
@@ -757,6 +865,7 @@ function renderProducts() {
             });
 
             // 🔍 PERBAIKAN: Ketika pencarian aktif, filter kategori diabaikan
+            // FIX: Hanya satu blok untuk searchProduct
             document.getElementById('searchProduct').addEventListener('input', function () {
                 const searchTerm = this.value.toLowerCase().trim();
                 const clearBtn = document.getElementById('clearSearch');
@@ -784,34 +893,8 @@ function renderProducts() {
                 renderFilteredProducts(filteredProducts);
             });
 
-            // 🔥 PERBAIKAN: Saat kategori diubah, reset pencarian dan render ulang
-            document.querySelectorAll('.category-btn').forEach(btn => {
-                btn.addEventListener('click', function () {
-                    document.querySelectorAll('.category-btn').forEach(b => {
-                        b.classList.remove('active');
-                    });
-
-                    this.classList.add('active');
-                    currentCategory = this.dataset.category;
-
-                    // Reset pencarian dan render produk berdasarkan kategori baru
-                    document.getElementById('searchProduct').value = '';
-                    document.getElementById('clearSearch').classList.add('hidden');
-                    document.getElementById('searchInfo').classList.add('hidden');
-                    renderProducts();
-
-                    if (window.innerWidth <= 768) {
-                        const tooltip = document.getElementById('categoryTooltipMobile');
-                        tooltip.textContent = this.dataset.tooltip;
-                        tooltip.classList.add('show');
-                        setTimeout(() => {
-                            tooltip.classList.remove('show');
-                        }, 2000);
-                    }
-                });
-            });
-
             // 🔥 PERBAIKAN: Fungsi clear search yang konsisten
+            // FIX: Hanya satu blok untuk clearSearch
             document.getElementById('clearSearch').addEventListener('click', function () {
                 document.getElementById('searchProduct').value = '';
                 this.classList.add('hidden');
@@ -820,6 +903,7 @@ function renderProducts() {
             });
 
             // 🔥 PERBAIKAN: Fungsi clear search results yang konsisten
+            // FIX: Hanya satu blok untuk clearSearchResults
             document.getElementById('clearSearchResults').addEventListener('click', function (e) {
                 e.stopPropagation();
                 document.getElementById('searchProduct').value = '';
@@ -827,105 +911,7 @@ function renderProducts() {
                 document.getElementById('searchInfo').classList.add('hidden');
                 renderProducts(); // Kembali ke produk berdasarkan kategori aktif
             });
-            // 🔥 PERBAIKAN: Fungsi untuk mendapatkan nama kategori
-            function getCategoryName(categoryKey) {
-                const categoryNames = {
-                    'all': 'Semua',
-                    'makanan': 'Makanan',
-                    'minuman': 'Minuman',
-                    'printing': 'Jasa Printing',
-                    'atk': 'ATK'
-                };
-                return categoryNames[categoryKey] || 'Semua';
-            }
-
-            // 🔥 PERBAIKAN: Saat kategori diubah, reset pencarian dan render ulang
-            document.querySelectorAll('.category-btn').forEach(btn => {
-                btn.addEventListener('click', function () {
-                    document.querySelectorAll('.category-btn').forEach(b => {
-                        b.classList.remove('active');
-                    });
-
-                    this.classList.add('active');
-                    currentCategory = this.dataset.category;
-
-                    // Reset pencarian dan render produk berdasarkan kategori baru
-                    document.getElementById('searchProduct').value = '';
-                    document.getElementById('clearSearch').classList.add('hidden');
-                    document.getElementById('searchInfo').classList.add('hidden');
-                    renderProducts();
-
-                    if (window.innerWidth <= 768) {
-                        const tooltip = document.getElementById('categoryTooltipMobile');
-                        tooltip.textContent = this.dataset.tooltip;
-                        tooltip.classList.add('show');
-                        setTimeout(() => {
-                            tooltip.classList.remove('show');
-                        }, 2000);
-                    }
-                });
-            });
-
-            // PERBAIKAN: Fungsi clear search yang memperhitungkan kategori
-            document.getElementById('clearSearch').addEventListener('click', function () {
-                document.getElementById('searchProduct').value = '';
-                this.classList.add('hidden');
-                document.getElementById('searchInfo').classList.add('hidden');
-                renderProducts(); // Kembali ke produk berdasarkan kategori aktif
-            });
-
-            // PERBAIKAN: Fungsi clear search results yang memperhitungkan kategori
-            document.getElementById('clearSearchResults').addEventListener('click', function (e) {
-                e.stopPropagation();
-                document.getElementById('searchProduct').value = '';
-                document.getElementById('clearSearch').classList.add('hidden');
-                document.getElementById('searchInfo').classList.add('hidden');
-                renderProducts(); // Kembali ke produk berdasarkan kategori aktif
-            });
-
-            // PERBAIKAN: Saat kategori diubah, reset pencarian tapi pertahankan filter kategori
-            document.querySelectorAll('.category-btn').forEach(btn => {
-                btn.addEventListener('click', function () {
-                    document.querySelectorAll('.category-btn').forEach(b => {
-                        b.classList.remove('active');
-                    });
-
-                    this.classList.add('active');
-                    currentCategory = this.dataset.category;
-
-                    // PERBAIKAN: Reset pencarian tapi render produk berdasarkan kategori baru
-                    document.getElementById('searchProduct').value = '';
-                    document.getElementById('clearSearch').classList.add('hidden');
-                    document.getElementById('searchInfo').classList.add('hidden');
-                    renderProducts();
-
-                    if (window.innerWidth <= 768) {
-                        const tooltip = document.getElementById('categoryTooltipMobile');
-                        tooltip.textContent = this.dataset.tooltip;
-                        tooltip.classList.add('show');
-                        setTimeout(() => {
-                            tooltip.classList.remove('show');
-                        }, 2000);
-                    }
-                });
-            });
-            // Clear search button
-            document.getElementById('clearSearch').addEventListener('click', function () {
-                document.getElementById('searchProduct').value = '';
-                this.classList.add('hidden');
-                document.getElementById('searchInfo').classList.add('hidden');
-                renderProducts();
-            });
-
-            // Clear search results button
-            document.getElementById('clearSearchResults').addEventListener('click', function (e) {
-                e.stopPropagation();
-                document.getElementById('searchProduct').value = '';
-                document.getElementById('clearSearch').classList.add('hidden');
-                document.getElementById('searchInfo').classList.add('hidden');
-                renderProducts();
-            });
-
+            
             // Clear cart
             document.getElementById('clearCart').addEventListener('click', function () {
                 if (confirm('Yakin ingin mengosongkan keranjang?')) {
@@ -1022,6 +1008,27 @@ function renderProducts() {
                 document.getElementById('qrisPreviewModal').classList.add('hidden');
                 document.getElementById('qrisPreviewModal').classList.remove('flex');
             });
+
+            // Event listener untuk gambar QRIS
+            document.getElementById("qrisProofImage").onclick = function () {
+                const full = document.getElementById("qrisFullscreen");
+                const img = document.getElementById("qrisFullscreenImg");
+                img.src = this.src;
+                full.style.display = "flex";
+            };
+
+            document.getElementById("qrisPreviewImage").onclick = function () {
+                const full = document.getElementById("qrisFullscreen");
+                const img = document.getElementById("qrisFullscreenImg");
+                img.src = this.src;
+                full.style.display = "flex";
+            };
+
+            document.getElementById("qrisFullscreen").onclick = function () {
+                this.style.display = "none";
+            };
+
+            listenersInitialized = true; // Tandai bahwa listener sudah di-setup
         }
 
         function addToCart(productId) {
@@ -1031,6 +1038,8 @@ function renderProducts() {
             }
 
             const product = products.find(p => p.id === productId);
+            if (!product) return;
+
             const existingItem = cart.find(item => item.id === productId);
             if (existingItem) {
                 existingItem.quantity += 1;
@@ -1051,7 +1060,7 @@ function renderProducts() {
                 element.classList.remove('clicked');
             }, 600);
 
-            animateProductToCart(element, products.find(p => p.id === productId).name);
+            animateProductToCart(element, products.find(p => p.id === productId)?.name || 'Produk');
 
             addToCart(productId);
         }
@@ -1075,8 +1084,10 @@ function renderProducts() {
 
         function renderCart() {
             const cartItems = document.getElementById('cartItems');
-            const totalItems = cart.reduce((total, item) => total + item.quantity, 0);
             const cartBadge = document.getElementById('cartBadge');
+            if (!cartItems || !cartBadge) return;
+
+            const totalItems = cart.reduce((total, item) => total + item.quantity, 0);
 
             if (totalItems > 0) {
                 cartBadge.textContent = totalItems;
@@ -1119,7 +1130,7 @@ function renderProducts() {
         }
 
         function updateTotals() {
-            const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+            const total = calculateTotal();
             document.getElementById('total').textContent = `Rp ${total.toLocaleString('id-ID')}`;
         }
 
@@ -1129,6 +1140,8 @@ function renderProducts() {
 
         function updatePaymentButton() {
             const paymentBtn = document.getElementById('processPayment');
+            if (!paymentBtn) return;
+            
             const paymentMethod = document.getElementById('paymentMethod').value;
             const total = calculateTotal();
 
@@ -1185,8 +1198,11 @@ function renderProducts() {
             const random3Digit = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
             const ordersNumber = `ORD-${timestampJakarta}${random3Digit}`;
 
+            // Simpan cart saat ini untuk struk
+            const itemsForReceipt = [...cart];
+
             lastTransaction = {
-                items: [...cart],
+                items: itemsForReceipt,
                 total,
                 paymentMethod,
                 cashAmount,
@@ -1248,11 +1264,13 @@ function renderProducts() {
             const saveSuccess = await saveOrderToDatabase(lastTransaction);
             if (!saveSuccess) {
                 showNotification('Gagal menyimpan data transaksi ke database', 'error');
+                // Jangan reset jika gagal, agar user bisa coba lagi
+                return;
             }
 
             transactions.push(lastTransaction);
 
-            generateReceipt(paymentMethod, total, tanggalJakarta);
+            generateReceipt(paymentMethod, total, tanggalJakarta, itemsForReceipt);
 
             document.getElementById('receiptModal').classList.remove('hidden');
             document.getElementById('receiptModal').classList.add('flex');
@@ -1269,7 +1287,7 @@ function renderProducts() {
             showNotification('Pembayaran berhasil diproses!', 'success');
         }
 
-        function generateReceipt(paymentMethod, total, tanggalJakartaStr) {
+        function generateReceipt(paymentMethod, total, tanggalJakartaStr, items) {
             const cashAmount = parseFloat(document.getElementById('cashAmount').value) || 0;
             const change = cashAmount - total;
 
@@ -1310,7 +1328,7 @@ function renderProducts() {
     </div>
 
     <div class="space-y-1 mb-2">
-        ${cart.map(item => `
+        ${items.map(item => `
             <div class="flex justify-between text-xs">
                 <div class="flex-1">
                     <div>${item.name}</div>
@@ -1548,9 +1566,10 @@ function renderProducts() {
 
 
         // Helper: increment history_badge dan set flag pada order secara aman
-        async function incrementCustomerHistoryBadgeForOrder(ordersNumber) {
+        // FIX: Ini adalah satu-satunya fungsi increment, yang lain dihapus
+        async function incrementCustomerHistoryBadge(ordersNumber) {
             try {
-                console.log(`🔄 incrementCustomerHistoryBadgeForOrder: ${ordersNumber}`);
+                console.log(`🔄 incrementCustomerHistoryBadge: ${ordersNumber}`);
 
                 // 1) Ambil order paling update
                 const { data: orderRow, error: fetchErr } = await supabase
@@ -1564,8 +1583,6 @@ function renderProducts() {
                     return false;
                 }
 
-                // Hanya lanjut jika ada email, status sebelumnya adalah completed (atau sesuai flow kita)
-                // NOTE: we expect caller sudah mengubah status jadi 'completed' (atau kita cek kondisional di caller)
                 if (!orderRow.email_customers || orderRow.email_customers.trim() === '') {
                     console.log('⏩ Skip increment: email_customers kosong');
                     return false;
@@ -1590,7 +1607,7 @@ function renderProducts() {
                     return false;
                 }
 
-                // 3) Hitung dan update badge (bukan operasi atomic SQL, tapi cukup untuk kebanyakan kasus)
+                // 3) Hitung dan update badge
                 const currentBadge = customer.history_badge || 0;
                 const newBadge = currentBadge + 1;
 
@@ -1611,9 +1628,7 @@ function renderProducts() {
                     .eq('orders_number', ordersNumber);
 
                 if (updateOrderFlagErr) {
-                    // customer sudah diincrement - jika ini gagal, masih lebih baik dibanding tidak meng-increment sama sekali.
-                    console.error('⚠️ Gagal set history_badge_counted pada order (harus cek manual):', updateOrderFlagErr);
-                    // tetap return true karena badge sudah ditambahkan
+                    console.error('⚠️ Gagal set history_badge_counted pada order:', updateOrderFlagErr);
                 }
 
                 console.log(`✅ history_badge untuk ${email} diupdate: ${currentBadge} → ${newBadge}`);
@@ -1625,61 +1640,8 @@ function renderProducts() {
             }
         }
 
-
-        // Main: proses konfirmasi order (ganti implementasi lama)
-        async function processOrderConfirmation(order) {
-            try {
-                console.log('🟢 Memproses pesanan:', order.orders_number);
-
-                // Ubah status jadi completed
-                const { data, error } = await supabase
-                    .from('orders')
-                    .update({ status: 'completed', updated_at: new Date().toISOString() })
-                    .eq('orders_number', order.orders_number)
-                    .eq('status', 'pending') // hanya ubah kalau masih pending
-                    .select();
-
-                if (error) throw error;
-
-                if (!data || data.length === 0) {
-                    console.log('⚠️ Order sudah completed atau tidak ditemukan.');
-                    return;
-                }
-
-                const email = data[0].email_customers;
-                if (!email) return;
-
-                // Tambah history_badge berdasarkan email
-                const { data: cust, error: custErr } = await supabase
-                    .from('customers_data')
-                    .select('history_badge')
-                    .eq('email', email)
-                    .single();
-
-                if (custErr || !cust) {
-                    console.warn('⚠️ Customer tidak ditemukan:', email);
-                    return;
-                }
-
-                const newBadge = (cust.history_badge || 0) + 1;
-
-                const { error: updErr } = await supabase
-                    .from('customers_data')
-                    .update({ history_badge: newBadge })
-                    .eq('email', email);
-
-                if (updErr) console.error('❌ Gagal update badge:', updErr);
-                else console.log(`✅ Badge ${email} → ${newBadge}`);
-
-                showNotification(`Pesanan ${order.orders_number} selesai`, 'success');
-            } catch (err) {
-                console.error('❌ processOrderConfirmation error:', err);
-                showNotification('Gagal memproses pesanan', 'error');
-            }
-        }
-
-
         // ✅ PERBAIKAN: Fungsi processOrderConfirmation yang disederhanakan
+        // FIX: Ini adalah satu-satunya fungsi processOrderConfirmation, yang lain dihapus
         async function processOrderConfirmation(order) {
             try {
                 console.log('🔄 Memulai proses order:', order.orders_number);
@@ -1700,13 +1662,13 @@ function renderProducts() {
 
                 console.log('✅ Status order diupdate ke completed');
 
-                // 2. Increment history_badge - TANPA KONDISI history_badge_counted
+                // 2. Increment history_badge
                 const incrementSuccess = await incrementCustomerHistoryBadge(order.orders_number);
 
                 if (incrementSuccess) {
                     console.log('✅ history_badge berhasil diincrement');
                 } else {
-                    console.log('ℹ️ history_badge tidak diincrement (mungkin email kosong atau customer tidak ditemukan)');
+                    console.log('ℹ️ history_badge tidak diincrement (mungkin email kosong, customer tidak ditemukan, atau sudah dihitung)');
                 }
 
                 // 3. Kurangi stok produk
@@ -1736,6 +1698,7 @@ function renderProducts() {
                 showNotification('Gagal memproses pesanan: ' + error.message, 'error');
             }
         }
+
 
         // ✅ FUNGSI BANTU: Debug untuk melihat data customer
         async function debugCustomerData(email) {
@@ -1767,52 +1730,8 @@ function renderProducts() {
             return result;
         }
 
-        // PERBAIKAN: Fungsi processOrderConfirmation yang sudah diperbaiki
-        async function processOrderConfirmation(order) {
-            try {
-                console.log('🔄 Memproses pesanan:', order.orders_number);
-
-                // 1. Update status order menjadi completed
-                const { data, error } = await supabase
-                    .from('orders')
-                    .update({
-                        status: 'completed',
-                        email_admin: currentAdmin.email
-                    })
-                    .eq('orders_number', order.orders_number);
-
-                if (error) throw error;
-
-                console.log('✅ Order completed');
-
-                // 2. Increment history_badge jika memenuhi syarat
-                await incrementCustomerHistoryBadge(order.orders_number);
-
-                // 3. Kurangi stok produk
-                await reduceOnlineOrderStock(order.orders_number);
-
-                // 4. Tampilkan notifikasi dan refresh UI
-                showNotification(`Pesanan ${order.orders_number} berhasil diproses!`, 'success');
-                await updateOnlineOrdersBadge();
-                renderOnlineOrders();
-
-                // 5. Tampilkan struk
-                await viewTransactionReceiptFromDB(order.orders_number);
-
-                // 6. Tutup modal
-                const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
-                onlineOrdersMenu.classList.remove('show');
-                setTimeout(() => {
-                    onlineOrdersMenu.classList.add('hidden');
-                }, 300);
-
-            } catch (error) {
-                console.error('❌ Error:', error);
-                showNotification('Gagal memproses pesanan: ' + error.message, 'error');
-            }
-        }
-
         // PERBAIKAN: Fungsi untuk mengurangi stok produk untuk pesanan online
+        // FIX: Ini adalah satu-satunya fungsi reduceOnlineOrderStock, yang lain dihapus
         async function reduceOnlineOrderStock(ordersNumber) {
             try {
                 // Ambil semua item dari order_items
@@ -1826,35 +1745,12 @@ function renderProducts() {
                     return;
                 }
 
-                // Untuk setiap item, kurangi stok di product_list
-                for (const item of orderItems) {
-                    // Dapatkan stok saat ini
-                    const { data: product, error: productError } = await supabase
-                        .from('product_list')
-                        .select('stock')
-                        .eq('id', item.product_id)
-                        .single();
+                // Gunakan fungsi updateProductStock yang sudah ada
+                await updateProductStock(orderItems.map(item => ({
+                    product_id: item.product_id,
+                    quantity: item.quantity
+                })));
 
-                    if (productError) {
-                        console.error(`Error fetching product ${item.product_id}:`, productError);
-                        continue;
-                    }
-
-                    // Hitung stok baru
-                    const newStock = product.stock - item.quantity;
-
-                    // Update stok di database
-                    const { error: updateError } = await supabase
-                        .from('product_list')
-                        .update({ stock: newStock })
-                        .eq('id', item.product_id);
-
-                    if (updateError) {
-                        console.error(`Error updating stock for product ${item.product_id}:`, updateError);
-                    } else {
-                        console.log(`✅ Stock for product ${item.product_id} reduced by ${item.quantity}. New stock: ${newStock}`);
-                    }
-                }
             } catch (error) {
                 console.error('Error in reduceOnlineOrderStock:', error);
             }
@@ -1894,14 +1790,13 @@ function renderProducts() {
             });
         }
 
-
-
         // PERBAIKAN: Fungsi untuk notifikasi pesanan online - ambil data dari Supabase + efek suara
         async function updateOnlineOrdersBadge() {
             if (!isLoggedIn) return;
 
             const badge = document.getElementById('onlineOrdersBadge');
             const sound = document.getElementById('notificationSound');
+            if (!badge) return;
 
             try {
                 const onlineOrders = await getOnlineOrders();
@@ -1934,6 +1829,7 @@ function renderProducts() {
             if (!isLoggedIn) return;
 
             const ordersList = document.getElementById('onlineOrdersList');
+            if (!ordersList) return;
 
             try {
                 const onlineOrders = await getOnlineOrders();
@@ -2031,56 +1927,6 @@ function renderProducts() {
             }
         }
 
-        async function processOrderConfirmation(order) {
-            try {
-                console.log('🔄 Memproses pesanan:', order.orders_number);
-
-                // ✅ STEP 1: Increment history badge
-                if (order.email_customers && order.status === 'pending') {
-                    const { data: customer } = await supabase
-                        .from('customers_data')
-                        .select('history_badge')
-                        .eq('email', order.email_customers)
-                        .single();
-
-                    if (customer) {
-                        const newBadge = (customer.history_badge || 0) + 1;
-
-                        await supabase
-                            .from('customers_data')
-                            .update({ history_badge: newBadge })
-                            .eq('email', order.email_customers);
-
-                        console.log(`✅ history_badge untuk ${order.email_customers} → ${newBadge}`);
-                    }
-                }
-
-                // ✅ STEP 2: Update status order menjadi completed
-                await supabase
-                    .from('orders')
-                    .update({
-                        status: 'completed',
-                        email_admin: currentAdmin.email
-                    })
-                    .eq('orders_number', order.orders_number);
-
-                // ✅ STEP 3: Refresh UI
-                showNotification(`Pesanan ${order.orders_number} berhasil diproses!`, 'success');
-                await updateOnlineOrdersBadge();
-                renderOnlineOrders();
-
-                const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
-                onlineOrdersMenu.classList.remove('show');
-                setTimeout(() => onlineOrdersMenu.classList.add('hidden'), 300);
-
-            } catch (err) {
-                console.error('❌ Error:', err);
-                showNotification('Error: ' + err.message, 'error');
-            }
-        }
-
-
-
         // Variabel untuk menyimpan data order sementara
         let currentProcessingOrder = null;
 
@@ -2123,15 +1969,21 @@ function renderProducts() {
                 const confirmBtn = document.getElementById('confirmProcessOrder');
                 const cancelBtn = document.getElementById('cancelProcessOrder');
 
+                // Hapus listener lama agar tidak duplikat
+                const newConfirmBtn = confirmBtn.cloneNode(true);
+                confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
+
+                const newCancelBtn = cancelBtn.cloneNode(true);
+                cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+
+
                 const cleanup = () => {
-                    confirmBtn.removeEventListener('click', confirmHandler);
-                    cancelBtn.removeEventListener('click', cancelHandler);
                     modal.classList.add('hidden');
                     modal.classList.remove('flex');
                 };
 
                 const confirmHandler = async () => {
-                    await processOrderConfirmation(order);
+                    await processOrderConfirmation(order); // Panggil fungsi utama
                     cleanup();
                 };
 
@@ -2140,8 +1992,8 @@ function renderProducts() {
                     showNotification('Pemrosesan pesanan dibatalkan', 'info');
                 };
 
-                confirmBtn.addEventListener('click', confirmHandler);
-                cancelBtn.addEventListener('click', cancelHandler);
+                newConfirmBtn.addEventListener('click', confirmHandler);
+                newCancelBtn.addEventListener('click', cancelHandler);
             });
         }
 
@@ -2165,9 +2017,14 @@ function renderProducts() {
             const closeBtn = document.getElementById('closeQrisPreview');
             const confirmBtn = document.getElementById('confirmFromQrisPreview');
 
+            // Hapus listener lama
+            const newCloseBtn = closeBtn.cloneNode(true);
+            closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+            const newConfirmBtn = confirmBtn.cloneNode(true);
+            confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
+
+
             const cleanup = () => {
-                closeBtn.removeEventListener('click', closeHandler);
-                confirmBtn.removeEventListener('click', confirmHandler);
                 previewModal.classList.add('hidden');
                 previewModal.classList.remove('flex');
             };
@@ -2179,129 +2036,13 @@ function renderProducts() {
 
             const confirmHandler = async () => {
                 cleanup();
-                await processOrderConfirmation(order);
+                await processOrderConfirmation(order); // Panggil fungsi utama
             };
 
-            closeBtn.addEventListener('click', closeHandler);
-            confirmBtn.addEventListener('click', confirmHandler);
+            newCloseBtn.addEventListener('click', closeHandler);
+            newConfirmBtn.addEventListener('click', confirmHandler);
         }
-
-        async function processOrderConfirmation(order) {
-            try {
-                console.log('🔄 Memproses pesanan:', order.orders_number);
-                // ✅ STEP 1: Increment history_badge jika ada email dan status sebelumnya pending
-                if (order.email_customers && order.status === 'pending') {
-                    const { data: customer } = await supabase
-                        .from('customers_data')
-                        .select('history_badge')
-                        .eq('email', order.email_customers)
-                        .single();
-
-                    if (customer) {
-                        const newBadge = (customer.history_badge || 0) + 1;
-
-                        await supabase
-                            .from('customers_data')
-                            .update({ history_badge: newBadge })
-                            .eq('email', order.email_customers);
-
-                        console.log(`✅ history_badge untuk ${order.email_customers} → ${newBadge}`);
-                    }
-                }
-
-
-                // 2. Update status order
-                const { data, error } = await supabase
-                    .from('orders')
-                    .update({
-                        status: 'completed',
-                        email_admin: currentAdmin.email
-                    })
-                    .eq('orders_number', order.orders_number);
-
-                if (error) throw error;
-
-                console.log('✅ Order completed');
-                showNotification(`Pesanan ${order.orders_number} berhasil diproses!`, 'success');
-
-                // 3. Lanjutkan proses lainnya...
-                await viewTransactionReceiptFromDB(order.orders_number);
-                await updateOnlineOrdersBadge();
-                renderOnlineOrders();
-
-                // Tutup modal
-                const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
-                onlineOrdersMenu.classList.remove('show');
-                setTimeout(() => {
-                    onlineOrdersMenu.classList.add('hidden');
-                }, 300);
-
-            } catch (error) {
-                console.error('❌ Error:', error);
-                showNotification('Gagal memproses pesanan: ' + error.message, 'error');
-            }
-        }
-
-        // PERBAIKAN 3: Fungsi untuk mengurangi stok produk untuk pesanan online
-        async function reduceOnlineOrderStock(ordersNumber) {
-            try {
-                // Ambil semua item dari order_items
-                const { data: orderItems, error } = await supabase
-                    .from('order_items')
-                    .select('product_id, quantity')
-                    .eq('orders_number', ordersNumber);
-
-                if (error) {
-                    console.error('Error fetching order items for stock reduction:', error);
-                    return;
-                }
-
-                // Untuk setiap item, kurangi stok di product_list
-                for (const item of orderItems) {
-                    // Dapatkan stok saat ini
-                    const { data: product, error: productError } = await supabase
-                        .from('product_list')
-                        .select('stock')
-                        .eq('id', item.product_id)
-                        .single();
-
-                    if (productError) {
-                        console.error(`Error fetching product ${item.product_id}:`, productError);
-                        continue;
-                    }
-
-                    let newStock = product.stock - item.quantity;
-                    if (newStock < 0) {
-                        console.warn(`Stock for product ${item.product_id} would be negative. Setting to 0.`);
-                        newStock = 0;
-                    }
-
-                    // Update stok
-                    const { error: updateError } = await supabase
-                        .from('orders')
-                        .update({ status: 'completed' })
-                        .eq('orders_number', selectedOrder.orders_number);
-
-                    if (!updateError) {
-
-                        // ✅ Tambahan baru
-                        await incrementCustomerHistoryBadge(selectedOrder.email_customers);
-
-                        showNotification('Pesanan berhasil diproses', 'success');
-                    } else {
-                        showNotification('Gagal memproses pesanan', 'error');
-                    }
-
-                    if (updateError) {
-                        console.error(`Error updating stock for product ${item.product_id}:`, updateError);
-                    } else {
-                        console.log(`✅ Stock for product ${item.product_id} reduced by ${item.quantity}. New stock: ${newStock}`);
-                    }
-                }
-            } catch (error) {
-                console.error('Error in reduceOnlineOrderStock:', error);
-            }
-        }
+        
 
         // PERBAIKAN: Fungsi untuk melihat struk pesanan online
         async function viewOnlineOrderReceipt(ordersNumber) {
@@ -2447,13 +2188,13 @@ function renderProducts() {
             const receiptContent = document.getElementById('receiptContent');
             const total = order.subtotal;
             const paymentMethod = order.payment_methode;
-            const cashAmount = paymentMethod === 'tunai' ? total : 0;
-            const change = cashAmount - total;
+            const cashAmount = paymentMethod === 'tunai' ? total : 0; // Asumsi
+            const change = 0; // Tidak bisa tahu dari DB
 
             const orderDate = new Date(order.order_date);
             const formattedDate = orderDate.toLocaleString('id-ID');
 
-            const customerName = orderItems[0]?.name || '';
+            const customerName = order.customers_name || '';
             const role = orderItems[0]?.role || '';
             const place = orderItems[0]?.place || '';
 
@@ -2461,14 +2202,13 @@ function renderProducts() {
             currentReceiptPhoneNumber = telpNumber;
 
             // PERBAIKAN: Ambil catatan hanya sekali dari item pertama yang memiliki catatan
-            const notes = orderItems[0]?.notes?.trim() || '';
+            const notes = order.note || orderItems[0]?.notes?.trim() || '';
 
-            const deliveryList = orderItems
-                .map(i => i.delivery_option)
+            const deliveryList = [order.delivery_option, ...orderItems.map(i => i.delivery_option)]
                 .filter(v => v && v.trim() !== '');
 
             const deliveryOption = (() => {
-                if (deliveryList.length === 0) return '';
+                if (deliveryList.length === 0) return 'Ambil Sendiri';
                 const seen = new Set();
                 const unique = [];
                 for (const d of deliveryList) {
@@ -2479,7 +2219,7 @@ function renderProducts() {
                         unique.push(clean);
                     }
                 }
-                return unique.length ? unique[0] : '';
+                return unique.length ? unique[0] : 'Ambil Sendiri';
             })();
 
             receiptContent.innerHTML = `
@@ -2565,77 +2305,7 @@ function renderProducts() {
     </div>
   `;
         }
-
-        // =============================================
-        // Fungsi untuk melihat struk transaksi lama
-        // =============================================
-        function viewTransactionReceipt(receiptNumber) {
-            if (!isLoggedIn) {
-                showNotification('Silakan login terlebih dahulu', 'error');
-                return;
-            }
-
-            const transaction = transactions.find(t => t.receiptNumber === receiptNumber);
-            if (!transaction) return;
-
-            currentReceiptPhoneNumber = null;
-
-            const receiptContent = document.getElementById('receiptContent');
-            receiptContent.innerHTML = `
-        <div class="text-center mb-3">
-          <h4 class="font-bold text-md">AKSARA-MART</h4>
-          <p class="text-xs">Jalan Keputih Tegal No 54, Surabaya</p>
-          <p class="text-xs">Telp: 0888-1343-038</p>
-        </div>
-        <div class="border-t border-b border-dashed py-2 mb-2">
-          <div class="flex justify-between text-xs">
-            <span>No. Transaksi:</span>
-            <span>${transaction.receiptNumber}</span>
-          </div>
-          <div class="flex justify-between text-xs">
-            <span>Tanggal:</span>
-            <span>${transaction.date.toLocaleString('id-ID')}</span>
-          </div>
-        </div>
-        <div class="space-y-1 mb-2">
-          ${transaction.items.map(item => `
-            <div class="flex justify-between text-xs">
-              <div class="flex-1">
-                <div>${item.name}</div>
-                <div class="text-gray-500">${item.quantity} x Rp ${item.price.toLocaleString('id-ID')}</div>
-              </div>
-              <div>Rp ${(item.price * item.quantity).toLocaleString('id-ID')}</div>
-            </div>
-          `).join('')}
-        </div>
-        <div class="border-t border-dashed pt-2">
-          <div class="flex justify-between font-bold text-sm">
-            <span>Total:</span>
-            <span>Rp ${transaction.total.toLocaleString('id-ID')}</span>
-          </div>
-          <div class="flex justify-between text-xs mt-1">
-            <span>Pembayaran:</span>
-            <span>${transaction.paymentMethod === 'cash' ? 'Tunai' : 'QRIS'}</span>
-          </div>
-          ${transaction.paymentMethod === 'cash' ? `
-          <div class="flex justify-between text-xs mt-1">
-            <span>Bayar:</span>
-            <span>Rp ${transaction.cashAmount.toLocaleString('id-ID')}</span>
-          </div>
-          <div class="flex justify-between text-xs mt-1">
-            <span>Kembalian:</span>
-            <span>Rp ${transaction.change.toLocaleString('id-ID')}</span>
-          </div>` : ''}
-        </div>
-        <div class="text-center mt-3 text-xs">
-          <p>Terima kasih sudah belanja <br> di Aksara-Mart 🙏😊.</p>
-        </div>
-      `;
-
-            document.getElementById('receiptModal').classList.remove('hidden');
-            document.getElementById('receiptModal').classList.add('flex');
-        }
-
+        
         // Fungsi untuk menampilkan preview QRIS khusus mobile
         function showQrisMobilePreview(imageSrc) {
             const modal = document.getElementById('qrisMobilePreviewModal');
@@ -2650,7 +2320,7 @@ function renderProducts() {
             modal.classList.remove('hidden');
             document.body.style.overflow = 'hidden';
 
-            setupQrisMobileListeners();
+            // Listener sudah di-setup di DOMContentLoaded
         }
 
         // Fungsi untuk menutup preview QRIS mobile
@@ -2668,11 +2338,15 @@ function renderProducts() {
             const modal = document.getElementById('qrisMobilePreviewModal');
 
             if (closeBtn) {
+                // Hapus listener lama jika ada
                 const newCloseBtn = closeBtn.cloneNode(true);
                 closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
 
                 newCloseBtn.addEventListener('click', closeQrisMobilePreview);
-                newCloseBtn.addEventListener('touchend', closeQrisMobilePreview);
+                newCloseBtn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    closeQrisMobilePreview();
+                });
             }
 
             if (modal) {
@@ -2683,30 +2357,3 @@ function renderProducts() {
                 });
             }
         }
-
-        // Inisialisasi saat DOM ready
-        document.addEventListener('DOMContentLoaded', function () {
-            setupQrisMobileListeners();
-        });
-
-        // ✅ Klik gambar bukti QRIS → fullscreen
-        document.getElementById("qrisProofImage").onclick = function () {
-            const full = document.getElementById("qrisFullscreen");
-            const img = document.getElementById("qrisFullscreenImg");
-            img.src = this.src;
-            full.style.display = "flex";
-        };
-
-        // ✅ Untuk preview modal
-        document.getElementById("qrisPreviewImage").onclick = function () {
-            const full = document.getElementById("qrisFullscreen");
-            const img = document.getElementById("qrisFullscreenImg");
-            img.src = this.src;
-            full.style.display = "flex";
-        };
-
-        // Event listener untuk tombol tutup fullscreen
-        document.getElementById("qrisFullscreen").onclick = function () {
-            this.style.display = "none";
-        };
-    
