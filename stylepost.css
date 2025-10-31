@@ -294,18 +294,22 @@ input::placeholder {
   width: 100%;
 }
 
+/* PERBAIKAN: Style tombol filter dengan teks dan ikon di tengah */
 .search-container button,
 .filter-toggle {
-  border: none !important;
-  box-shadow: none !important;
-  background: #1e3a8a !important;
-  color: #ffffff !important;
-  padding-top: 0.55rem !important;
-  padding-bottom: 0.55rem !important;
-  font-size: 0.83rem !important;
-  border-radius: 0.6rem !important;
-  transition: none !important;
+  background: #1e3a8a;              /* warna default: biru tua */
+  border: none;
+  color: #ffffff;
+  border-radius: 8px;
+  padding: 8px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1;
   cursor: pointer;
+  transition: background 0.3s ease, transform 0.2s ease;
 }
 
 .filter-toggle-container {
@@ -315,16 +319,17 @@ input::placeholder {
   height: 100%;
   display: flex;
   align-items: center;
+  justify-content: center; /* biar tombolnya pas di tengah vertikal */
   padding-right: 0.5rem;
 }
 
 .filter-toggle:hover {
-  background: rgba(30, 58, 138, 0.2);
+  background: #1e40af;             /* sedikit lebih terang saat hover */
 }
 
 .filter-toggle.active {
-  background: #1e40af !important;
-  color: white !important;
+  background: #1d4ed8;             /* lebih cerah saat aktif */
+  color: #fff;
 }
 
 #filterToggleMobile {
@@ -1588,11 +1593,13 @@ input::placeholder {
     padding-right: 0.5rem;
   }
 
+  /* PERBAIKAN: Style tombol filter mobile dengan ikon di tengah */
   .filter-toggle {
-    padding: 8px;
+    padding: 8px !important;
     width: 40px;
     height: 40px;
-    justify-content: center;
+    justify-content: center !important;
+    min-width: 40px !important;
   }
 
   .filter-toggle span {
