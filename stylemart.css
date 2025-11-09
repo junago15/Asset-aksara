@@ -980,6 +980,10 @@
             z-index: 1000;
             padding: 1.5rem;
             transition: transform 0.3s ease;
+            /* --- PERBAIKAN DITAMBAHKAN DI SINI (Instance 1) --- */
+            max-height: 90vh;
+            overflow-y: auto;
+            /* --- AKHIR PERBAIKAN --- */
         }
 
         .profile-modal.open {
@@ -1724,6 +1728,10 @@
             opacity: 0;
             visibility: hidden;
             transition: all 0.6s ease;
+            /* --- PERBAIKAN DITAMBAHKAN DI SINI (Instance 2) --- */
+            max-height: 90vh;
+            overflow-y: auto;
+            /* --- AKHIR PERBAIKAN --- */
         }
 
 
@@ -2012,6 +2020,10 @@
             opacity: 0;
             visibility: hidden;
             transition: all 0.6s ease;
+            /* --- PERBAIKAN DITAMBAHKAN DI SINI (Instance 2) --- */
+            max-height: 90vh;
+            overflow-y: auto;
+            /* --- AKHIR PERBAIKAN --- */
         }
 
 
@@ -2213,3 +2225,5 @@
             font-size: 0.7rem;
             font-weight: bold;
         }
+
+}
