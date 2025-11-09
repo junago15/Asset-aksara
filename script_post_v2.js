@@ -1,4 +1,4 @@
-        const supabaseUrl = "https://vhurelhciwirynuqpnjt.supabase.co";
+           const supabaseUrl = "https://vhurelhciwirynuqpnjt.supabase.co";
         const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZodXJlbGhjaXdpcnludXFwbmp0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAzOTg2NDMsImV4cCI6MjA2NTk3NDY0M30.g6-dnlvk3-svrzvw0Ce9vcSdXn3l9pQVocr_hQDAJIU";
         const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
 
@@ -14,8 +14,11 @@
 
         // Variabel untuk state cleanup
         let timeInterval = null;
-        let orderBadgeInterval = null;
+        let orderBadgeInterval = null; // Tetap ada untuk fallback
         let productSubscription = null;
+        
+        // --- FIX 2: Variabel untuk langganan order realtime ---
+        let orderSubscription = null;
 
         // Fungsi untuk reset tombol login ke keadaan semula
         function resetLoginButton() {
@@ -170,6 +173,12 @@
                     await supabase.removeChannel(productSubscription);
                     productSubscription = null;
                 }
+                // --- FIX 2: Hentikan subscription order ---
+                if (orderSubscription) {
+                    await supabase.removeChannel(orderSubscription);
+                    orderSubscription = null;
+                }
+                // --- END FIX 2 ---
 
                 // Reset data state
                 cart = [];
@@ -204,11 +213,16 @@
                 await loadProducts();
                 await subscribeProducts(); // Tunggu subscription selesai
                 setupEventListeners(); // Setup listener (dibuat aman untuk dipanggil ulang)
+                
+                // --- FIX 2: Hapus polling, ganti dengan subscription ---
+                if (orderBadgeInterval) {
+                    clearInterval(orderBadgeInterval);
+                    orderBadgeInterval = null;
+                }
+                // Panggil fungsi subscription realtime untuk order
+                await subscribeToOrders();
+                // --- END FIX 2 ---
 
-                await updateOnlineOrdersBadge();
-                // FIX: Hapus timer lama jika ada sebelum membuat yang baru
-                if (orderBadgeInterval) clearInterval(orderBadgeInterval);
-                orderBadgeInterval = setInterval(updateOnlineOrdersBadge, 5000);
             } catch (error) {
                 console.error('Error initializing app:', error);
             }
@@ -342,6 +356,51 @@
                 });
         }
 
+        // --- FIX 2: FUNGSI BARU UNTUK REALTIME ORDER ---
+        async function subscribeToOrders() {
+            if (!isLoggedIn) return;
+
+            // Hapus channel lama jika ada
+            if (orderSubscription) {
+                try {
+                    await supabase.removeChannel(orderSubscription);
+                } catch (error) {
+                    console.warn("Error removing old order channel: ", error);
+                }
+                orderSubscription = null;
+            }
+
+            orderSubscription = supabase
+                .channel('public:orders-pos') // Channel unik untuk POS
+                .on('postgres_changes',
+                    { event: 'INSERT', schema: 'public', table: 'orders' },
+                    (payload) => {
+                        console.log('🔔 Realtime: New order detected!', payload.new);
+                        // Ada order baru masuk (INSERT)
+                        // Panggil updateOnlineOrdersBadge, yang akan mengecek
+                        // jumlah total pending dan memutar suara jika count bertambah.
+                        updateOnlineOrdersBadge();
+                    }
+                )
+                .subscribe((status, error) => {
+                    if (status === 'SUBSCRIBED') {
+                        console.log('✅ Realtime order subscription active');
+                        // Jalankan sekali saat pertama terhubung untuk sinkronisasi
+                        updateOnlineOrdersBadge();
+                    }
+                    if (status === 'CHANNEL_ERROR' || error) {
+                        console.error('❌ Realtime order subscription error:', error);
+                        // Fallback ke polling jika subscription gagal
+                        if (!orderBadgeInterval) {
+                            console.warn('Fallback ke 5s polling untuk orders.');
+                            updateOnlineOrdersBadge(); // Jalankan sekali
+                            orderBadgeInterval = setInterval(updateOnlineOrdersBadge, 5000);
+                        }
+                    }
+                });
+        }
+        // --- END FIX 2 ---
+
         function sortProducts() {
             const categoryOrder = ["makanan", "minuman", "printing", "atk"];
             const orderMap = categoryOrder.reduce((m, c, i) => (m[c] = i, m), {});
@@ -359,175 +418,12 @@
             });
         }
 
-        // PERBAIKAN: Fungsi untuk menyimpan order ke tabel orders di Supabase
-        async function saveOrderToDatabase(transaction) {
-            if (
-                !transaction ||
-                !transaction.items ||
-                !Array.isArray(transaction.items) ||
-                transaction.items.length === 0
-            ) {
-                console.warn('saveOrderToDatabase dipanggil tanpa transaksi yang valid.');
-                return false;
-            }
-
-            if (!isLoggedIn || !currentAdmin) {
-                console.error('User not logged in or admin data not available');
-                return false;
-            }
-
-            try {
-                // Waktu Jakarta (UTC+7)
-                const nowUTC = new Date();
-                const jakartaTimeMs = nowUTC.getTime() + 7 * 60 * 60 * 1000;
-                const nowJakarta = new Date(jakartaTimeMs);
-
-                const pad = (n, size = 2) => n.toString().padStart(size, '0');
-                const formattedJakarta =
-                    `${nowJakarta.getUTCFullYear()}-${pad(nowJakarta.getUTCMonth() + 1)}-${pad(nowJakarta.getUTCDate())} ` +
-                    `${pad(nowJakarta.getUTCHours())}:${pad(nowJakarta.getUTCMinutes())}:${pad(nowJakarta.getUTCSeconds())}.` +
-                    `${nowJakarta.getUTCMilliseconds().toString().padStart(3, '0')}`;
-
-                // Nomor Order
-                const timestampJakarta = jakartaTimeMs;
-                const random3Digit = Math.floor(Math.random() * 1000)
-                    .toString()
-                    .padStart(3, '0');
-                const ordersNumber = `ORD-${timestampJakarta}${random3Digit}`;
-                const numericOrder = ordersNumber.replace('ORD-', '');
-
-                // Data tambahan
-                const productList = transaction.items.map((item) => item.name).join(', ');
-                const qrisReference =
-                    transaction.paymentMethod === 'qris'
-                        ? `https://vhurelhciwirynuqpnjt.supabase.co/storage/v1/object/public/Qris_image/qris_${numericOrder}.webp`
-                        : null;
-
-                // Data tabel orders
-                const orderData = {
-                    order_date: formattedJakarta,
-                    orders_number: ordersNumber,
-                    status: 'completed',
-                    subtotal: transaction.total,
-                    delivery_option: 'ambil sendiri',
-                    payment_methode: transaction.paymentMethod === 'cash' ? 'tunai' : 'qris',
-                    payment_status: 'paid',
-                    cashier: currentAdmin.name,
-                    payment_check: 'verified',
-                    product_list: productList,
-                    order_by: 'offline',
-                    email_admin: currentAdmin.email || null,
-                    qris_reference: qrisReference,
-                    delivery_fee: 0,
-                    note: '',
-                    customers_name: 'Pelanggan Offline',
-                    email_customers: null,
-                    completed_counted: false,
-                    history_badge_counted: false
-                };
-
-                // Simpan ke tabel orders
-                const { data: orderResult, error: orderError } = await supabase
-                    .from('orders')
-                    .insert([orderData]);
-
-                if (orderError) {
-                    console.error('❌ Error saving order to database:', orderError);
-                    showNotification(
-                        'Gagal menyimpan data transaksi ke database: ' + orderError.message,
-                        'error'
-                    );
-                    return false;
-                }
-
-                console.log('✅ Order saved successfully:', orderResult);
-
-                // Siapkan data order_items
-                const orderItems = transaction.items.map((item) => ({
-                    orders_number: ordersNumber,
-                    product_id: item.id,
-                    product_name: item.name,
-                    quantity: item.quantity,
-                    price: item.price,
-                    total_price: item.price * item.quantity,
-                    created_at: formattedJakarta,
-                    name: null,
-                    email_customers: null,
-                    telp_number: null,
-                    role: null,
-                    place: null,
-                    notes: null
-                }));
-
-                // Simpan ke tabel order_items
-                const { data: itemsResult, error: itemsError } = await supabase
-                    .from('order_items')
-                    .insert(orderItems);
-
-                if (itemsError) {
-                    console.error('❌ Gagal menyimpan order_items:', itemsError);
-                    showNotification(
-                        'Gagal menyimpan data ke tabel order_items: ' + itemsError.message,
-                        'error'
-                    );
-                    return false;
-                }
-
-                console.log(`✅ ${orderItems.length} item berhasil disimpan ke order_items`, itemsResult);
-
-                // Kurangi stok produk setelah checkout
-                await updateProductStock(orderItems);
-
-                showNotification('Transaksi dan detail barang berhasil disimpan', 'success');
-                return true;
-
-            } catch (error) {
-                console.error('⚠️ Error in saveOrderToDatabase:', error);
-                showNotification('Error saat menyimpan data transaksi: ' + error.message, 'error');
-                return false;
-            }
-        }
-
-        // Fungsi untuk mengurangi stok produk setelah checkout (untuk offline/online)
-        async function updateProductStock(orderItems) {
-            try {
-                for (const item of orderItems) {
-                    // Ambil stok saat ini
-                    const { data: product, error: productError } = await supabase
-                        .from('product_list')
-                        .select('stock')
-                        .eq('id', item.product_id)
-                        .single();
-
-                    if (productError) {
-                        console.error(`Error fetching product ${item.product_id}:`, productError);
-                        continue;
-                    }
-
-                    // Hitung stok baru
-                    let newStock = product.stock - item.quantity;
-                    if (newStock < 0) {
-                        console.warn(`Stock for product ${item.product_id} would be negative. Setting to 0.`);
-                        newStock = 0;
-                    }
-
-
-                    // Update stok di database
-                    const { error: updateError } = await supabase
-                        .from('product_list')
-                        .update({ stock: newStock })
-                        .eq('id', item.product_id);
-
-                    if (updateError) {
-                        console.error(`Error updating stock for product ${item.product_id}:`, updateError);
-                    } else {
-                        console.log(`✅ Stock for product ${item.product_id} reduced by ${item.quantity}. New stock: ${newStock}`);
-                    }
-                }
-            } catch (error) {
-                console.error('Error in updateProductStock:', error);
-            }
-        }
+        // =======================================================================
+        // LOGIKA KRITIS DIPINDAHKAN KE SUPABASE FUNCTIONS (RPC)
+        // Fungsi saveOrderToDatabase, updateProductStock, incrementCustomerHistoryBadge,
+        // dan reduceOnlineOrderStock telah DIHAPUS dari file JS ini.
+        // Logika mereka sekarang ada di dalam file SQL (Bagian 1).
+        // =======================================================================
 
         // Function untuk menambahkan denominasi uang
         function addDenomination(amount) {
@@ -635,36 +531,41 @@ function renderProducts() {
 }
 
 
+function renderFilteredProducts(filteredProducts) {
+  const grid = document.getElementById('productsGrid');
 
-        function renderFilteredProducts(filteredProducts) {
-            const grid = document.getElementById('productsGrid');
+  if (filteredProducts.length === 0) {
+    grid.innerHTML = `
+      <div class="col-span-full text-center py-8">
+        <i class="fas fa-search text-3xl text-gray-400 mb-3"></i>
+        <p class="text-gray-600 text-sm">Tidak ada produk ditemukan</p>
+        <p class="text-gray-500 text-xs">Coba kata kunci lain atau pilih kategori berbeda</p>
+      </div>
+    `;
+    return;
+  }
 
-            if (filteredProducts.length === 0) {
-                grid.innerHTML = `
-            <div class="col-span-full text-center py-8">
-                <i class="fas fa-search text-3xl text-gray-400 mb-3"></i>
-                <p class="text-gray-600 text-sm">Tidak ada produk ditemukan</p>
-                <p class="text-gray-500 text-xs">Coba kata kunci lain atau pilih kategori berbeda</p>
-            </div>
-        `;
-                return;
-            }
+  grid.innerHTML = filteredProducts.map(product => {
+    const isOutOfStock = product.stock <= 0;
 
-            grid.innerHTML = filteredProducts.map(product => {
-                return `
-        <div class="product-card" onclick="addToCartWithAnimation(${product.id}, this)">
-            <div class="product-image-wrapper">
-                <img src="${product.image}" alt="${product.name}" class="product-image-fixed" loading="lazy">
-            </div>
-            <div class="product-content">
-                <h3 class="product-name">${product.name}</h3>
-                <p class="product-price">Rp ${product.price.toLocaleString('id-ID')}</p>
-                <p class="product-stock">Stok: ${product.stock}</p>
-            </div>
+    return `
+      <div class="product-card ${isOutOfStock ? 'pointer-events-none' : ''}"
+           ${!isOutOfStock ? `onclick="addToCartWithAnimation(${product.id}, this)"` : ''}>
+        <div class="product-image-wrapper">
+          <img src="${product.image}" alt="${product.name}" class="product-image-fixed" loading="lazy">
         </div>
-        `;
-            }).join('');
-        }
+        <div class="product-content">
+          <h3 class="product-name">${product.name}</h3>
+          <p class="product-price">Rp ${product.price.toLocaleString('id-ID')}</p>
+          <p class="product-stock ${isOutOfStock ? 'text-red-600 font-semibold' : ''}">
+            ${isOutOfStock ? 'Stok Kosong' : `Stok: ${product.stock}`}
+          </p>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
 
         function showNotification(message, type = 'info') {
             const notification = document.getElementById('notification');
@@ -938,18 +839,41 @@ function renderProducts() {
             // File upload handling
             document.getElementById('proofUpload').addEventListener('change', function (e) {
                 const file = e.target.files[0];
+                
+                // --- PERBAIKAN 4: Ambil elemen teks ---
+                const uploadText = document.getElementById('uploadText');
+                const uploadPreview = document.getElementById('uploadPreview');
+                // --- End Perbaikan 4 ---
+
                 if (file) {
+                    // --- PERBAIKAN 4: Tampilkan spinner ---
+                    uploadText.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Memproses...';
+                    uploadPreview.classList.add('hidden'); // Sembunyikan preview lama
+                    // --- End Perbaikan 4 ---
+
                     const reader = new FileReader();
                     reader.onload = function (e) {
-                        document.getElementById('previewImage').src = e.target.result;
+                        const previewImage = document.getElementById('previewImage'); 
+                        previewImage.src = e.target.result;
+                        
+                        // --- PERBAIKAN 2: Perbesar thumbnail & object-contain ---
+                        previewImage.style.height = '12rem'; // 192px
+                        previewImage.style.objectFit = 'contain';
+                        // --- End Perbaikan 2 ---
+
                         document.getElementById('fileName').textContent = file.name;
-                        document.getElementById('uploadPreview').classList.remove('hidden');
-                        document.getElementById('uploadText').textContent = 'Ganti file';
+                        uploadPreview.classList.remove('hidden'); // Tampilkan preview baru
+                        
+                        // --- PERBAIKAN 4: Kembalikan teks tombol ---
+                        uploadText.innerHTML = '<i class="fas fa-cloud-upload-alt mr-1"></i> Ganti file';
+                        // --- End Perbaikan 4 ---
+                        
                         updatePaymentButton();
                     };
                     reader.readAsDataURL(file);
                 }
             });
+
 
             // Cash amount input
             document.getElementById('cashAmount').addEventListener('input', function () {
@@ -1031,56 +955,108 @@ function renderProducts() {
             listenersInitialized = true; // Tandai bahwa listener sudah di-setup
         }
 
-        function addToCart(productId) {
-            if (!isLoggedIn) {
-                showNotification('Silakan login terlebih dahulu', 'error');
-                return;
-            }
+function addToCart(productId) {
+  if (!isLoggedIn) {
+    showNotification('Silakan login terlebih dahulu', 'error');
+    return;
+  }
 
-            const product = products.find(p => p.id === productId);
-            if (!product) return;
+  const product = products.find(p => p.id === productId);
+  if (!product) return;
 
-            const existingItem = cart.find(item => item.id === productId);
-            if (existingItem) {
-                existingItem.quantity += 1;
-            } else {
-                cart.push({ ...product, quantity: 1 });
-            }
-            renderCart();
-        }
+  // 🚫 Jika stok habis
+  if (product.stock <= 0) {
+    showNotification('Stok produk ini habis', 'error');
+    return;
+  }
 
-        function addToCartWithAnimation(productId, element) {
-            if (!isLoggedIn) {
-                showNotification('Silakan login terlebih dahulu', 'error');
-                return;
-            }
+  const existingItem = cart.find(item => item.id === productId);
 
-            element.classList.add('clicked');
-            setTimeout(() => {
-                element.classList.remove('clicked');
-            }, 600);
+  if (existingItem) {
+    // 🚫 Cegah jika sudah mencapai stok maksimum
+    if (existingItem.quantity >= product.stock) {
+      showNotification('Jumlah melebihi stok tersedia', 'error');
+      return;
+    }
+    existingItem.quantity += 1;
+  } else {
+    cart.push({ ...product, quantity: 1 });
+  }
 
-            animateProductToCart(element, products.find(p => p.id === productId)?.name || 'Produk');
+  renderCart();
+}
 
-            addToCart(productId);
-        }
+function addToCartWithAnimation(productId, element) {
+  if (!isLoggedIn) {
+    showNotification('Silakan login terlebih dahulu', 'error');
+    return;
+  }
+
+  const product = products.find(p => p.id === productId);
+  if (!product) return;
+
+  // 🚫 Stop jika stok habis
+  if (product.stock <= 0) {
+    showNotification('Stok produk ini habis', 'error');
+    return;
+  }
+
+  const existingItem = cart.find(i => i.id === productId);
+  if (existingItem && existingItem.quantity >= product.stock) {
+    showNotification('Jumlah melebihi stok tersedia', 'error');
+    return;
+  }
+
+  // 🎞️ Jalankan animasi cepat tanpa lock delay
+  element.classList.add('clicked');
+  setTimeout(() => element.classList.remove('clicked'), 300);
+  animateProductToCart(element, product.name || 'Produk');
+
+  // ✅ Tambah ke keranjang
+  addToCart(productId);
+}
+
+
 
         function removeFromCart(productId) {
             cart = cart.filter(item => item.id !== productId);
             renderCart();
         }
 
-        function updateQuantity(productId, change) {
-            const item = cart.find(item => item.id === productId);
-            if (item) {
-                item.quantity += change;
-                if (item.quantity <= 0) {
-                    removeFromCart(productId);
-                } else {
-                    renderCart();
-                }
+function updateQuantity(productId, change) {
+  const item = cart.find(i => i.id === productId);
+  const product = products.find(p => p.id === productId);
+  if (!item || !product) return;
+
+  const newQty = item.quantity + change;
+
+  // 🚫 Cegah melebihi stok
+  if (newQty > product.stock) {
+    showNotification('Jumlah melebihi stok tersedia', 'error');
+    return;
+  }
+
+  // 🗑️ Hapus jika jumlah <= 0
+  if (newQty <= 0) {
+    removeFromCart(productId);
+    return;
+  }
+
+  // ✅ Update jumlah dan render ulang
+  item.quantity = newQty;
+  renderCart();
+}
+
+        // --- FIX 3: FUNGSI BARU UNTUK MENONAKTIFKAN KONTROL BAYAR ---
+        function togglePaymentControls(disabled) {
+            const paymentSection = document.querySelector('.payment-section');
+            if (paymentSection) {
+                // Gunakan opacity dan pointer-events untuk menonaktifkan seluruh area
+                paymentSection.style.opacity = disabled ? '0.6' : '1';
+                paymentSection.style.pointerEvents = disabled ? 'none' : 'auto';
             }
         }
+        // --- END FIX 3 ---
 
         function renderCart() {
             const cartItems = document.getElementById('cartItems');
@@ -1124,6 +1100,11 @@ function renderProducts() {
             </div>
         `).join('');
             }
+
+            // --- FIX 3: Panggil fungsi toggle control ---
+            // Panggil ini *sebelum* updateTotals/updatePaymentButton
+            togglePaymentControls(cart.length === 0);
+            // --- END FIX 3 ---
 
             updateTotals();
             updatePaymentButton();
@@ -1176,116 +1157,162 @@ function renderProducts() {
             return `${Y}-${M}-${D} ${hh}:${mm}:${ss}.${ms}`;
         }
 
+        // --- FUNGSI processPayment DIMODIFIKASI (MENGGUNAKAN RPC) ---
         async function processPayment() {
-            if (!isLoggedIn) {
-                showNotification('Silakan login terlebih dahulu', 'error');
-                return;
-            }
+            // 1. Dapatkan tombol dan simpan HTML aslinya
+            const paymentBtn = document.getElementById('processPayment');
+            const originalBtnHTML = paymentBtn.innerHTML;
+            
+            // 2. Tampilkan spinner dan nonaktifkan tombol
+            paymentBtn.disabled = true;
+            paymentBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i> Memproses...`;
 
-            const paymentMethod = document.getElementById('paymentMethod').value;
-            const total = calculateTotal();
-
-            const nowUTCms = Date.now();
-            const jakartaOffsetMs = 7 * 60 * 60 * 1000;
-            const nowJakarta = new Date(nowUTCms + jakartaOffsetMs);
-
-            const tanggalJakarta = formatJakartaISOStringWithMs(nowJakarta);
-
-            const cashAmount = parseFloat(document.getElementById('cashAmount').value) || 0;
-            const change = cashAmount - total;
-
-            const timestampJakarta = nowJakarta.getTime();
-            const random3Digit = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-            const ordersNumber = `ORD-${timestampJakarta}${random3Digit}`;
-
-            // Simpan cart saat ini untuk struk
-            const itemsForReceipt = [...cart];
-
-            lastTransaction = {
-                items: itemsForReceipt,
-                total,
-                paymentMethod,
-                cashAmount,
-                change,
-                receiptNumber: 'TRX' + timestampJakarta.toString().slice(-8),
-                date: tanggalJakarta,
-                ordersNumber,
-                qrisUrl: null
-            };
-
-            if (paymentMethod === 'qris') {
-                const fileInput = document.getElementById('proofUpload');
-                const file = fileInput.files[0];
-                if (!file) {
-                    showNotification('Silakan unggah bukti QRIS terlebih dahulu', 'error');
-                    return;
+            // 3. Tambahkan penundaan (delay) 0.5 detik
+            await new Promise(resolve => setTimeout(resolve, 500)); 
+            
+            try {
+                // 4. Mulai logika proses pembayaran
+                if (!isLoggedIn) {
+                    showNotification('Silakan login terlebih dahulu', 'error');
+                    throw new Error('Not logged in'); // Lemparkan error agar ditangkap 'finally'
                 }
 
-                try {
-                    const cleanNumber = ordersNumber.replace('ORD-', '');
-                    const fileName = `qris_${cleanNumber}.webp`;
+                const paymentMethod = document.getElementById('paymentMethod').value;
+                const total = calculateTotal();
+                const cashAmount = parseFloat(document.getElementById('cashAmount').value) || 0;
+                const change = cashAmount - total;
+                const itemsForReceipt = [...cart]; // Salin keranjang
 
-                    const compressedWebp = await new Promise((resolve) => {
-                        const img = new Image();
-                        const reader = new FileReader();
-                        reader.onload = (e) => (img.src = e.target.result);
-                        img.onload = () => {
-                            const canvas = document.createElement('canvas');
-                            const maxWidth = 800;
-                            const scale = Math.min(maxWidth / img.width, 1);
-                            canvas.width = Math.round(img.width * scale);
-                            canvas.height = Math.round(img.height * scale);
-                            const ctx = canvas.getContext('2d');
-                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                            canvas.toBlob((blob) => resolve(blob), 'image/webp', 0.8);
-                        };
-                        reader.readAsDataURL(file);
-                    });
+                let qrisUrl = null;
 
-                    const { error: uploadError } = await supabase.storage
-                        .from('Qris_image')
-                        .upload(fileName, compressedWebp, {
-                            contentType: 'image/webp',
-                            upsert: true
+                // 5. Handle QRIS Upload (jika perlu)
+                if (paymentMethod === 'qris') {
+                    const fileInput = document.getElementById('proofUpload');
+                    const file = fileInput.files[0];
+                    if (!file) {
+                        showNotification('Silakan unggah bukti QRIS terlebih dahulu', 'error');
+                        throw new Error('No QRIS proof uploaded');
+                    }
+                    
+                    try {
+                        // Generate nama unik untuk file
+                        const now = Date.now();
+                        const random3Digit = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+                        const tempName = `qris_offline_${now}${random3Digit}.webp`;
+
+                        // Kompresi gambar
+                        const compressedWebp = await new Promise((resolve) => {
+                            const img = new Image();
+                            const reader = new FileReader();
+                            reader.onload = (e) => (img.src = e.target.result);
+                            img.onload = () => {
+                                const canvas = document.createElement('canvas');
+                                const maxWidth = 800;
+                                const scale = Math.min(maxWidth / img.width, 1);
+                                canvas.width = Math.round(img.width * scale);
+                                canvas.height = Math.round(img.height * scale);
+                                const ctx = canvas.getContext('2d');
+                                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                canvas.toBlob((blob) => resolve(blob), 'image/webp', 0.8);
+                            };
+                            reader.readAsDataURL(file);
                         });
-                    if (uploadError) throw uploadError;
 
-                    const { data: urlData } = supabase.storage.from('Qris_image').getPublicUrl(fileName);
-                    const qrisUrl = urlData?.publicUrl;
-                    lastTransaction.qrisUrl = qrisUrl;
-                    console.log('✅ QRIS uploaded to:', qrisUrl);
-                } catch (err) {
-                    console.error('❌ Upload QRIS gagal:', err);
-                    showNotification('Gagal upload bukti QRIS', 'error');
-                    return;
+                        // Upload ke Supabase Storage
+                        const { error: uploadError } = await supabase.storage
+                            .from('Qris_image')
+                            .upload(tempName, compressedWebp, {
+                                contentType: 'image/webp',
+                                upsert: true
+                            });
+                        if (uploadError) throw uploadError;
+
+                        // Dapatkan URL publik
+                        const { data: urlData } = supabase.storage.from('Qris_image').getPublicUrl(tempName);
+                        qrisUrl = urlData?.publicUrl;
+                        if (!qrisUrl) throw new Error('Failed to get public URL for QRIS');
+                        console.log('✅ QRIS (offline) uploaded to:', qrisUrl);
+
+                    } catch (err) {
+                        console.error('❌ Upload QRIS gagal:', err);
+                        showNotification('Gagal upload bukti QRIS', 'error');
+                        throw err; // Lemparkan error lagi
+                    }
                 }
+
+                // 6. Siapkan payload untuk Supabase Function
+                const transactionPayload = {
+                    items: itemsForReceipt,
+                    total: total,
+                    paymentMethod: paymentMethod === 'cash' ? 'tunai' : 'qris',
+                    cashierName: currentAdmin.name,
+                    cashierEmail: currentAdmin.email,
+                    qrisUrl: qrisUrl // Akan null jika paymentMethod = cash
+                };
+
+                // 7. Panggil Supabase Function (RPC)
+                console.log('🔄 Memanggil RPC create_offline_order...');
+                const { data: newOrdersNumber, error: rpcError } = await supabase.rpc(
+                    'create_offline_order',
+                    { transaction_data: transactionPayload }
+                );
+
+                if (rpcError || !newOrdersNumber) {
+                    console.error('❌ RPC Error (create_offline_order):', rpcError);
+                    showNotification('Gagal menyimpan transaksi (RPC Error)', 'error');
+                    throw new Error(rpcError?.message || 'RPC returned null');
+                }
+
+                // --- Jalur Sukses ---
+                console.log('✅ Transaksi offline berhasil dibuat:', newOrdersNumber);
+
+                // Buat lastTransaction untuk struk
+                const nowJakarta = new Date(Date.now() + 7 * 60 * 60 * 1000);
+                const tanggalJakarta = formatJakartaISOStringWithMs(nowJakarta);
+
+                lastTransaction = {
+                    items: itemsForReceipt,
+                    total,
+                    paymentMethod,
+                    cashAmount,
+                    change,
+                    receiptNumber: 'TRX' + newOrdersNumber.slice(-11),
+                    date: tanggalJakarta,
+                    ordersNumber: newOrdersNumber,
+                    qrisUrl: qrisUrl
+                };
+
+                transactions.push(lastTransaction);
+
+                generateReceipt(paymentMethod, total, tanggalJakarta, itemsForReceipt);
+
+                // Tampilkan struk
+                document.getElementById('receiptModal').classList.remove('hidden');
+                document.getElementById('receiptModal').classList.add('flex');
+
+                // Reset UI
+                cart = [];
+                renderCart();
+                document.getElementById('cashAmount').value = '';
+                document.getElementById('change').classList.add('hidden');
+                document.getElementById('proofUpload').value = '';
+                document.getElementById('uploadPreview').classList.add('hidden');
+                document.getElementById('uploadText').textContent = 'Pilih file gambar';
+                document.getElementById('cartModal').classList.remove('show');
+
+                showNotification('Pembayaran berhasil diproses!', 'success');
+
+            } catch (error) {
+                console.error("Error during payment processing:", error.message);
+                // Notifikasi sebagian besar sudah ditampilkan di dalam 'try'
+            } finally {
+                // 8. SELALU kembalikan tombol ke keadaan semula
+                paymentBtn.disabled = false;
+                paymentBtn.innerHTML = originalBtnHTML;
+                updatePaymentButton();
             }
-
-            const saveSuccess = await saveOrderToDatabase(lastTransaction);
-            if (!saveSuccess) {
-                showNotification('Gagal menyimpan data transaksi ke database', 'error');
-                // Jangan reset jika gagal, agar user bisa coba lagi
-                return;
-            }
-
-            transactions.push(lastTransaction);
-
-            generateReceipt(paymentMethod, total, tanggalJakarta, itemsForReceipt);
-
-            document.getElementById('receiptModal').classList.remove('hidden');
-            document.getElementById('receiptModal').classList.add('flex');
-
-            cart = [];
-            renderCart();
-            document.getElementById('cashAmount').value = '';
-            document.getElementById('change').classList.add('hidden');
-            document.getElementById('proofUpload').value = '';
-            document.getElementById('uploadPreview').classList.add('hidden');
-            document.getElementById('uploadText').textContent = 'Pilih file gambar';
-            document.getElementById('cartModal').classList.remove('show');
-
-            showNotification('Pembayaran berhasil diproses!', 'success');
         }
+        // --- END MODIFIKASI processPayment ---
 
         function generateReceipt(paymentMethod, total, tanggalJakartaStr, items) {
             const cashAmount = parseFloat(document.getElementById('cashAmount').value) || 0;
@@ -1565,126 +1592,36 @@ function renderProducts() {
         }
 
 
-        // Helper: increment history_badge dan set flag pada order secara aman
-        // FIX: Ini adalah satu-satunya fungsi increment, yang lain dihapus
-        async function incrementCustomerHistoryBadge(ordersNumber) {
-            try {
-                console.log(`🔄 incrementCustomerHistoryBadge: ${ordersNumber}`);
-
-                // 1) Ambil order paling update
-                const { data: orderRow, error: fetchErr } = await supabase
-                    .from('orders')
-                    .select('orders_number, email_customers, status, history_badge_counted')
-                    .eq('orders_number', ordersNumber)
-                    .single();
-
-                if (fetchErr || !orderRow) {
-                    console.warn('⚠️ order tidak ditemukan atau error saat fetch:', fetchErr);
-                    return false;
-                }
-
-                if (!orderRow.email_customers || orderRow.email_customers.trim() === '') {
-                    console.log('⏩ Skip increment: email_customers kosong');
-                    return false;
-                }
-
-                if (orderRow.history_badge_counted) {
-                    console.log('⏩ Skip increment: history_badge_counted sudah true (sudah dihitung sebelumnya)');
-                    return false;
-                }
-
-                const email = orderRow.email_customers.trim();
-
-                // 2) Ambil customer
-                const { data: customer, error: custErr } = await supabase
-                    .from('customers_data')
-                    .select('history_badge, email')
-                    .ilike('email', email)
-                    .single();
-
-                if (custErr || !customer) {
-                    console.warn('⚠️ Customer tidak ditemukan untuk email:', email, custErr);
-                    return false;
-                }
-
-                // 3) Hitung dan update badge
-                const currentBadge = customer.history_badge || 0;
-                const newBadge = currentBadge + 1;
-
-                const { error: updateCustErr } = await supabase
-                    .from('customers_data')
-                    .update({ history_badge: newBadge, updated_at: new Date().toISOString() })
-                    .ilike('email', email);
-
-                if (updateCustErr) {
-                    console.error('❌ Gagal update customers_data history_badge:', updateCustErr);
-                    return false;
-                }
-
-                // 4) Tandai order agar tidak di-increment lagi
-                const { error: updateOrderFlagErr } = await supabase
-                    .from('orders')
-                    .update({ history_badge_counted: true, updated_at: new Date().toISOString() })
-                    .eq('orders_number', ordersNumber);
-
-                if (updateOrderFlagErr) {
-                    console.error('⚠️ Gagal set history_badge_counted pada order:', updateOrderFlagErr);
-                }
-
-                console.log(`✅ history_badge untuk ${email} diupdate: ${currentBadge} → ${newBadge}`);
-                return true;
-
-            } catch (err) {
-                console.error('🔥 Error incrementCustomerHistoryBadgeForOrder:', err);
-                return false;
-            }
-        }
-
-        // ✅ PERBAIKAN: Fungsi processOrderConfirmation yang disederhanakan
-        // FIX: Ini adalah satu-satunya fungsi processOrderConfirmation, yang lain dihapus
+        // --- FUNGSI processOrderConfirmation DIMODIFIKASI (MENGGUNAKAN RPC) ---
         async function processOrderConfirmation(order) {
             try {
-                console.log('🔄 Memulai proses order:', order.orders_number);
+                console.log('🔄 Memulai proses order via RPC:', order.orders_number);
 
-                // 1. Update status order menjadi completed
-                const { error: updateError } = await supabase
-                    .from('orders')
-                    .update({
-                        status: 'completed',
-                        email_admin: currentAdmin.email,
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq('orders_number', order.orders_number);
+                // 1. Panggil Supabase Function (RPC)
+                // Fungsi ini akan meng-update status, mengurangi stok, dan menambah badge
+                const { data: success, error: rpcError } = await supabase.rpc(
+                    'confirm_online_order',
+                    {
+                        order_num: order.orders_number,
+                        admin_email: currentAdmin.email
+                    }
+                );
 
-                if (updateError) {
-                    throw new Error(`Gagal update status order: ${updateError.message}`);
+                if (rpcError || !success) {
+                    console.error('❌ RPC Error (confirm_online_order):', rpcError);
+                    throw new Error(rpcError?.message || 'RPC returned false');
                 }
+                
+                console.log('✅ RPC confirm_online_order SUKSES');
 
-                console.log('✅ Status order diupdate ke completed');
-
-                // 2. Increment history_badge
-                const incrementSuccess = await incrementCustomerHistoryBadge(order.orders_number);
-
-                if (incrementSuccess) {
-                    console.log('✅ history_badge berhasil diincrement');
-                } else {
-                    console.log('ℹ️ history_badge tidak diincrement (mungkin email kosong, customer tidak ditemukan, atau sudah dihitung)');
-                }
-
-                // 3. Kurangi stok produk
-                await reduceOnlineOrderStock(order.orders_number);
-
-                // 4. Tampilkan notifikasi sukses
+                // 2. Tampilkan notifikasi sukses
                 showNotification(`Pesanan ${order.orders_number} berhasil diproses!`, 'success');
 
-                // 5. Refresh UI
-                await updateOnlineOrdersBadge();
-                renderOnlineOrders();
+                // 3. Refresh UI (badge dan daftar)
+                await updateOnlineOrdersBadge(); // Update badge setelah proses
+                renderOnlineOrders(); // Render ulang daftar untuk menghilangkan item
 
-                // 6. Tampilkan struk
-                await viewTransactionReceiptFromDB(order.orders_number);
-
-                // 7. Tutup modal online orders
+                // 4. Tutup modal online orders (jika terbuka)
                 const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
                 if (onlineOrdersMenu) {
                     onlineOrdersMenu.classList.remove('show');
@@ -1693,68 +1630,15 @@ function renderProducts() {
                     }, 300);
                 }
 
+                return true; // Kembalikan nilai sukses
+
             } catch (error) {
                 console.error('❌ Error dalam processOrderConfirmation:', error);
                 showNotification('Gagal memproses pesanan: ' + error.message, 'error');
+                return false; // Kembalikan nilai gagal
             }
         }
-
-
-        // ✅ FUNGSI BANTU: Debug untuk melihat data customer
-        async function debugCustomerData(email) {
-            try {
-                const { data: customer, error } = await supabase
-                    .from('customers_data')
-                    .select('*')
-                    .ilike('email', email)
-                    .single();
-
-                if (error) {
-                    console.error('❌ Debug: Customer tidak ditemukan untuk email:', email);
-                    return null;
-                }
-
-                console.log('🐛 Debug customer data:', customer);
-                return customer;
-            } catch (error) {
-                console.error('❌ Debug error:', error);
-                return null;
-            }
-        }
-
-        // ✅ FUNGSI BANTU: Test increment manual
-        async function testIncrement(ordersNumber) {
-            console.log('🧪 TEST: Manual increment untuk', ordersNumber);
-            const result = await incrementCustomerHistoryBadge(ordersNumber);
-            console.log('🧪 TEST Result:', result);
-            return result;
-        }
-
-        // PERBAIKAN: Fungsi untuk mengurangi stok produk untuk pesanan online
-        // FIX: Ini adalah satu-satunya fungsi reduceOnlineOrderStock, yang lain dihapus
-        async function reduceOnlineOrderStock(ordersNumber) {
-            try {
-                // Ambil semua item dari order_items
-                const { data: orderItems, error } = await supabase
-                    .from('order_items')
-                    .select('product_id, quantity')
-                    .eq('orders_number', ordersNumber);
-
-                if (error) {
-                    console.error('Error fetching order items for stock reduction:', error);
-                    return;
-                }
-
-                // Gunakan fungsi updateProductStock yang sudah ada
-                await updateProductStock(orderItems.map(item => ({
-                    product_id: item.product_id,
-                    quantity: item.quantity
-                })));
-
-            } catch (error) {
-                console.error('Error in reduceOnlineOrderStock:', error);
-            }
-        }
+        // --- END MODIFIKASI processOrderConfirmation ---
 
         // PERBAIKAN: Fungsi untuk mengambil data pesanan online dari Supabase
         async function getOnlineOrders() {
@@ -1930,72 +1814,95 @@ function renderProducts() {
         // Variabel untuk menyimpan data order sementara
         let currentProcessingOrder = null;
 
-        // Fungsi untuk menampilkan modal konfirmasi dengan preview QRIS terpisah
-        async function showOrderConfirmationModal(order) {
-            currentProcessingOrder = order;
+// ✅ Fungsi untuk menampilkan modal konfirmasi dengan efek spinner
+async function showOrderConfirmationModal(order) {
+    currentProcessingOrder = order;
 
-            const modal = document.getElementById('onlineOrderConfirmModal');
-            const confirmMessage = document.getElementById('confirmMessage');
-            const qrisProofSection = document.getElementById('qrisProofSection');
-            const qrisProofImage = document.getElementById('qrisProofImage');
+    const modal = document.getElementById('onlineOrderConfirmModal');
+    const confirmMessage = document.getElementById('confirmMessage');
+    const qrisProofSection = document.getElementById('qrisProofSection');
+    const qrisProofImage = document.getElementById('qrisProofImage');
 
-            confirmMessage.textContent = `Proses pesanan ${order.orders_number}?`;
+    confirmMessage.textContent = `Proses pesanan ${order.orders_number}?`;
 
-            if (order.payment_methode === 'qris' && order.qris_reference) {
-                qrisProofSection.classList.remove('hidden');
-                qrisProofImage.src = order.qris_reference;
-                qrisProofImage.alt = `Bukti QRIS - ${order.orders_number}`;
+    // 🔹 Tampilkan atau sembunyikan bukti QRIS
+    if (order.payment_methode === 'qris' && order.qris_reference) {
+        qrisProofSection.classList.remove('hidden');
+        qrisProofImage.src = order.qris_reference;
+        qrisProofImage.alt = `Bukti QRIS - ${order.orders_number}`;
+        qrisProofImage.style.cursor = 'pointer';
+        qrisProofImage.title = 'Klik untuk melihat gambar lebih besar';
 
-                qrisProofImage.style.cursor = 'pointer';
-                qrisProofImage.title = 'Klik untuk melihat gambar lebih besar';
-
-                qrisProofImage.onclick = (e) => {
-                    e.stopPropagation();
-                    if (window.innerWidth <= 768) {
-                        showQrisMobilePreview(order.qris_reference);
-                    } else {
-                        showQrisPreviewModal(order);
-                    }
-                };
-
+        qrisProofImage.onclick = (e) => {
+            e.stopPropagation();
+            if (window.innerWidth <= 768) {
+                showQrisMobilePreview(order.qris_reference);
             } else {
-                qrisProofSection.classList.add('hidden');
+                showQrisPreviewModal(order);
             }
+        };
+    } else {
+        qrisProofSection.classList.add('hidden');
+    }
 
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
 
-            return new Promise((resolve) => {
-                const confirmBtn = document.getElementById('confirmProcessOrder');
-                const cancelBtn = document.getElementById('cancelProcessOrder');
+    // ✅ Promise agar menunggu konfirmasi
+    return new Promise((resolve) => {
+        const confirmBtn = document.getElementById('confirmProcessOrder');
+        const cancelBtn = document.getElementById('cancelProcessOrder');
 
-                // Hapus listener lama agar tidak duplikat
-                const newConfirmBtn = confirmBtn.cloneNode(true);
-                confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
+        // Bersihkan listener lama
+        const newConfirmBtn = confirmBtn.cloneNode(true);
+        confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
 
-                const newCancelBtn = cancelBtn.cloneNode(true);
-                cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+        const newCancelBtn = cancelBtn.cloneNode(true);
+        cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
 
+        const cleanup = () => {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        };
 
-                const cleanup = () => {
-                    modal.classList.add('hidden');
-                    modal.classList.remove('flex');
-                };
+        // ⚡ Tambahkan efek spinner pada tombol konfirmasi
+        const confirmHandler = async () => {
+            const originalHTML = newConfirmBtn.innerHTML;
+            newConfirmBtn.disabled = true;
+            newConfirmBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Memproses...`;
 
-                const confirmHandler = async () => {
-                    await processOrderConfirmation(order); // Panggil fungsi utama
-                    cleanup();
-                };
+            try {
+                // --- PERBAIKAN 1: Modifikasi alur ---
+                const success = await processOrderConfirmation(order); // Panggil fungsi utama (TIDAK TAMPILKAN STRUK)
+                
+                cleanup(); // 1. Tutup modal konfirmasi (spinner hilang)
 
-                const cancelHandler = () => {
-                    cleanup();
-                    showNotification('Pemrosesan pesanan dibatalkan', 'info');
-                };
+                if (success) {
+                    // 2. Tampilkan struk SETELAH modal ditutup
+                    await viewTransactionReceiptFromDB(order.orders_number); 
+                }
+                // --- End Perbaikan 1 ---
+            } catch (err) {
+                console.error('❌ Gagal memproses pesanan:', err);
+                showNotification('Gagal memproses pesanan', 'error');
+                cleanup(); // <-- PERBAIKAN: Pastikan cleanup juga terjadi di error
+            } finally {
+                // 🔙 Kembalikan tombol seperti semula
+                newConfirmBtn.disabled = false;
+                newConfirmBtn.innerHTML = originalHTML;
+            }
+        };
 
-                newConfirmBtn.addEventListener('click', confirmHandler);
-                newCancelBtn.addEventListener('click', cancelHandler);
-            });
-        }
+        const cancelHandler = () => {
+            cleanup();
+            showNotification('Pemrosesan pesanan dibatalkan', 'info');
+        };
+
+        newConfirmBtn.addEventListener('click', confirmHandler);
+        newCancelBtn.addEventListener('click', cancelHandler);
+    });
+}
+
 
         // Fungsi untuk menampilkan modal preview QRIS besar
         function showQrisPreviewModal(order) {
@@ -2036,7 +1943,28 @@ function renderProducts() {
 
             const confirmHandler = async () => {
                 cleanup();
-                await processOrderConfirmation(order); // Panggil fungsi utama
+                // --- PERBAIKAN 1 (Modifikasi): Panggil alur yang sama seperti modal konfirmasi ---
+                // 1. Tampilkan spinner di tombol ini (opsional tapi bagus)
+                const originalHTML = newConfirmBtn.innerHTML;
+                newConfirmBtn.disabled = true;
+                newConfirmBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Memproses...`;
+
+                try {
+                    const success = await processOrderConfirmation(order); // Proses (tanpa struk)
+                    
+                    // 2. Tampilkan struk setelah proses selesai
+                    if (success) {
+                        await viewTransactionReceiptFromDB(order.orders_number);
+                    }
+                } catch (err) {
+                     console.error('❌ Gagal memproses pesanan dari preview:', err);
+                     showNotification('Gagal memproses pesanan', 'error');
+                } finally {
+                    // 3. Reset tombol dan tutup modal (cleanup sudah di awal)
+                    newConfirmBtn.disabled = false;
+                    newConfirmBtn.innerHTML = originalHTML;
+                }
+                // --- End Perbaikan 1 ---
             };
 
             newCloseBtn.addEventListener('click', closeHandler);
@@ -2059,45 +1987,54 @@ function renderProducts() {
             }
         }
 
-        // ====== Fungsi render riwayat transaksi ======
-        async function renderTransactionHistory(searchTerm = '') {
-            if (!isLoggedIn) return;
+// ====== Fungsi render riwayat transaksi (limit 500 terbaru) ======
+async function renderTransactionHistory(searchTerm = '') {
+  if (!isLoggedIn) return;
 
-            const historyList = document.getElementById('transactionHistoryList');
-            historyList.innerHTML = `
+  const historyList = document.getElementById('transactionHistoryList');
+  historyList.innerHTML = `
     <div class="text-center py-4 text-gray-400 animate-pulse">
       <i class="fas fa-spinner fa-spin text-lg"></i> Memuat riwayat transaksi...
     </div>
   `;
 
-            try {
-                const transactionHistory = await getAllTransactionHistory();
+  try {
+    // 🔥 Ambil hanya 500 transaksi terakhir agar tidak berat
+    const { data: transactionHistory, error } = await supabase
+      .from('orders')
+      .select('*')
+      .order('order_date', { ascending: false })
+      .limit(500);
 
-                let filteredTransactions = transactionHistory || [];
+    if (error) throw error;
 
-                if (searchTerm) {
-                    const searchTermLower = searchTerm.toLowerCase();
-                    filteredTransactions = transactionHistory.filter(transaction =>
-                        (transaction.orders_number && transaction.orders_number.toLowerCase().includes(searchTermLower)) ||
-                        (transaction.order_date && transaction.order_date.toLowerCase().includes(searchTermLower)) ||
-                        (transaction.product_list && transaction.product_list.toLowerCase().includes(searchTermLower)) ||
-                        (transaction.customers_name && transaction.customers_name.toLowerCase().includes(searchTermLower))
-                    );
-                }
+    let filteredTransactions = transactionHistory || [];
 
-                if (filteredTransactions.length === 0) {
-                    historyList.innerHTML = `
+    // 🔍 Filter pencarian
+    if (searchTerm) {
+      const searchTermLower = searchTerm.toLowerCase();
+      filteredTransactions = filteredTransactions.filter(transaction =>
+        (transaction.orders_number && transaction.orders_number.toLowerCase().includes(searchTermLower)) ||
+        (transaction.order_date && transaction.order_date.toLowerCase().includes(searchTermLower)) ||
+        (transaction.product_list && transaction.product_list.toLowerCase().includes(searchTermLower)) ||
+        (transaction.customers_name && transaction.customers_name.toLowerCase().includes(searchTermLower))
+      );
+    }
+
+    // 🚫 Jika tidak ada data
+    if (filteredTransactions.length === 0) {
+      historyList.innerHTML = `
         <div class="text-center py-8 text-gray-500">
           <i class="fas fa-receipt text-3xl mb-3"></i>
           <p class="text-sm">Tidak ada riwayat transaksi</p>
           ${searchTerm ? `<p class="text-xs text-gray-400">Untuk pencarian "${searchTerm}"</p>` : ''}
         </div>
       `;
-                    return;
-                }
+      return;
+    }
 
-                // PERBAIKAN 2: Tambahkan event listener untuk menutup modal online orders di mobile saat tombol lihat nota diklik
-                historyList.innerHTML = filteredTransactions.map(transaction => `
+    // ✅ Tampilkan daftar transaksi
+    historyList.innerHTML = filteredTransactions.map(transaction => `
       <div class="transaction-history-item hover:bg-gray-50 border border-gray-200 rounded-lg p-3 mb-2 transition"
            onclick="event.stopPropagation(); handleViewReceipt('${transaction.orders_number}')">
 
@@ -2117,33 +2054,32 @@ function renderProducts() {
           </div>
 
           <div class="text-right">
-            <div class="font-bold text-sm text-gray-800">Rp ${transaction.subtotal.toLocaleString('id-ID')}</div>
-
+            <div class="font-bold text-sm text-gray-800">Rp ${transaction.subtotal?.toLocaleString('id-ID') || 0}</div>
             <div class="text-xs text-gray-600 mt-0.5">
               ${transaction.payment_methode === 'tunai' ? 'Tunai' : 'QRIS'}
             </div>
           </div>
         </div>
 
-<button class="process-order-btn mt-2 py-1.5 rounded-md text-white text-xs font-medium transition"
-        style="background-color: #3B82F6;"
-        onclick="event.stopPropagation(); handleViewReceipt('${transaction.orders_number}')">
-  Lihat Nota
-</button>
-
+        <button class="process-order-btn mt-2 py-1.5 rounded-md text-white text-xs font-medium transition"
+                style="background-color: #3B82F6;"
+                onclick="event.stopPropagation(); handleViewReceipt('${transaction.orders_number}')">
+          Lihat Nota
+        </button>
       </div>
     `).join('');
 
-            } catch (error) {
-                console.error('Gagal memuat riwayat transaksi:', error);
-                historyList.innerHTML = `
+  } catch (error) {
+    console.error('Gagal memuat riwayat transaksi:', error);
+    historyList.innerHTML = `
       <div class="text-center py-8 text-red-500">
         <i class="fas fa-triangle-exclamation text-2xl mb-2"></i>
         <p class="text-sm">Terjadi kesalahan saat memuat riwayat transaksi.</p>
       </div>
     `;
-            }
-        }
+  }
+}
+
 
         // PERBAIKAN 2: Fungsi untuk menangani klik tombol lihat nota di mobile
         async function handleViewReceipt(ordersNumber) {
@@ -2357,3 +2293,107 @@ function renderProducts() {
                 });
             }
         }
+
+    // --- (SKRIP TAMBAHAN DARI HTML ASLI) ---
+    // Skrip untuk Service Worker
+    if ('serviceWorker' in navigator) {
+        const swCode = `
+    self.addEventListener("install", e => {
+      e.waitUntil(
+        caches.open("aksara-cache").then(cache => {
+          return cache.addAll(["./"]);
+        })
+      );
+    });
+    self.addEventListener("fetch", e => {
+      e.respondWith(
+        caches.match(e.request).then(resp => {
+          return resp || fetch(e.request);
+        })
+      );
+    });
+  `;
+        const blob = new Blob([swCode], { type: 'application/javascript' });
+        const swUrl = URL.createObjectURL(blob);
+        navigator.serviceWorker.register(swUrl)
+            .then(reg => console.log("Service Worker registered:", reg))
+            .catch(err => console.error("SW registration failed:", err));
+    }
+
+
+    // Fungsi untuk menampilkan gambar QRIS fullscreen
+    function showQrisFullscreen(imageSrc) {
+        const fullscreenModal = document.getElementById('qrisFullscreenModal');
+        const fullscreenImage = document.getElementById('qrisFullscreenImage');
+
+        fullscreenImage.src = imageSrc;
+        fullscreenModal.classList.remove('hidden');
+        fullscreenModal.style.display = 'flex';
+    }
+
+    // Fungsi untuk menutup fullscreen
+    function closeQrisFullscreen() {
+        const fullscreenModal = document.getElementById('qrisFullscreenModal');
+        fullscreenModal.classList.add('hidden');
+        fullscreenModal.style.display = 'none';
+    }
+
+    // Event listener untuk fullscreen
+    // Pastikan ini dijalankan setelah DOM ready
+    document.addEventListener('DOMContentLoaded', function () {
+        const closeBtn = document.getElementById('closeQrisFullscreen');
+        if (closeBtn) {
+             closeBtn.addEventListener('click', closeQrisFullscreen);
+        }
+
+        // Duplikat listener dari atas, pastikan hanya ada satu set yang berjalan
+        // (Listener ini sudah ada di dalam setupEventListeners, tapi kita amankan di sini)
+        const qrisProofImg = document.getElementById('qrisProofImage');
+        if(qrisProofImg) {
+            qrisProofImg.onclick = function () {
+                const full = document.getElementById("qrisFullscreen");
+                const img = document.getElementById("qrisFullscreenImg");
+                img.src = this.src;
+                full.style.display = "flex";
+            };
+        }
+        
+        const qrisPreviewImg = document.getElementById("qrisPreviewImage");
+        if(qrisPreviewImg) {
+            qrisPreviewImg.onclick = function () {
+                const full = document.getElementById("qrisFullscreen");
+                const img = document.getElementById("qrisFullscreenImg");
+                img.src = this.src;
+                full.style.display = "flex";
+            };
+        }
+    });
+
+
+    // Skrip untuk efek scroll
+    window.addEventListener('scroll', () => {
+        const glass = document.querySelector('.sticky-search-section .glass-effect');
+        if (!glass) return;
+        const blur = 28 + Math.min(window.scrollY / 25, 12);
+        const alpha = 0.03 + Math.min(window.scrollY / 2000, 0.05);
+        glass.style.backdropFilter = `blur(${blur}px) saturate(200%)`;
+        glass.style.background = `rgba(255, 255, 255, ${alpha})`;
+    });
+
+    // ✅ Izinkan audio play setelah user melakukan interaksi pertama
+    function enableNotificationSound() {
+        const sound = document.getElementById("notificationSound");
+        if (!sound) return;
+
+        sound.volume = 1.0;
+        sound.play().then(() => {
+            sound.pause();
+            sound.currentTime = 0;
+            console.log("🔊 Notification sound unlocked and ready.");
+            document.removeEventListener("click", enableNotificationSound);
+            document.removeEventListener("touchstart", enableNotificationSound);
+        }).catch(() => { });
+    }
+
+    document.addEventListener("click", enableNotificationSound);
+    document.addEventListener("touchstart", enableNotificationSound);
