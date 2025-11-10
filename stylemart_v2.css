@@ -532,10 +532,12 @@
             }
 
             .cart-items-container {
-                max-height: calc(100vh - 140px) !important;
+                /* --- PERBAIKAN DIMULAI --- */
+                /* Hapus max-height yang menyebabkan masalah layout */
+                /* max-height: calc(100vh - 140px) !important; */ 
+                /* Biarkan flex: 1 (dari global) dan overflow-y: auto (dari global) bekerja */
+                /* --- PERBAIKAN SELESAI --- */
                 padding: 0.5rem;
-                overflow-y: auto;
-                /* tetap bisa scroll kalau item banyak */
             }
 
 
@@ -546,6 +548,8 @@
 
             .cart-total-container {
                 padding: 0.75rem;
+                /* flex-shrink: 0; (sudah ada di global) */
+                /* position: static; (sudah ada di global) */
             }
 
             .cart-item-name,
@@ -911,6 +915,8 @@
             }
         }
 
+        /* --- PERBAIKAN MODAL KERANJANG DIMULAI --- */
+
         /* Modal Cart Styles - DIUBAH untuk full screen di mobile */
         .cart-modal {
             position: fixed;
@@ -922,7 +928,7 @@
             box-shadow: -5px 0 15px rgba(0, 0, 0, 0.1);
             transition: right 0.3s ease;
             z-index: 1000;
-            overflow-y: auto;
+            overflow: hidden; /* PERBAIKAN: Ganti dari auto ke hidden */
         }
 
         .cart-modal.open {
@@ -947,23 +953,28 @@
         .cart-container {
             display: flex;
             flex-direction: column;
-            height: 100%;
+            height: 100%; /* Memastikan container mengisi modal */
         }
 
         .cart-items-container {
-            flex: 1;
-            overflow-y: auto;
+            flex: 1; /* PERBAIKAN: Ini akan mengisi ruang tersisa */
+            overflow-y: auto; /* PERBAIKAN: Hanya area ini yang scroll */
             padding: 1rem;
         }
 
         .cart-total-container {
-            position: sticky;
-            bottom: 0;
+            /* PERBAIKAN: Hapus 'position: sticky' dan 'bottom: 0' */
+            /* position: sticky; */
+            /* bottom: 0; */
+            position: static; /* Pastikan kembali ke default */
+            flex-shrink: 0; /* PERBAIKAN: Pastikan area total tidak menyusut */
             background: #fff;
             border-top: 1px solid rgba(109, 40, 217, 0.2);
             padding: 0.75rem;
             z-index: 10;
         }
+
+        /* --- PERBAIKAN MODAL KERANJANG SELESAI --- */
 
 
         /* Profile Modal Styles */
@@ -2225,5 +2236,3 @@
             font-size: 0.7rem;
             font-weight: bold;
         }
-
-}
