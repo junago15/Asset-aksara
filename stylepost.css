@@ -475,7 +475,8 @@ input::placeholder {
 /* ===== PRODUCTS GRID & CARDS ===== */
 .products-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  /* Mengurangi jumlah kolom di layar lebar dan menambah lebar grid gambar */
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 0.75rem;
   width: 100%;
 }
@@ -491,7 +492,8 @@ input::placeholder {
   flex-direction: column;
   height: 100%;
   width: 100%;
-  max-width: 180px;
+  /* Meningkatkan lebar maksimum kartu */
+  max-width: 220px;
   margin: 0;
 }
 
@@ -503,7 +505,8 @@ input::placeholder {
 
 .product-image-wrapper {
   width: 100%;
-  height: 120px;
+  /* Meningkatkan tinggi wrapper gambar */
+  height: 140px;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -1528,7 +1531,8 @@ input::placeholder {
 /* Tablet & Larger Mobile Landscape */
 @media (max-width: 1024px) {
   .products-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    /* Menyesuaikan min-width untuk layar 1024px */
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   }
 }
 
@@ -1612,12 +1616,14 @@ input::placeholder {
   }
 
   .products-grid {
-    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    /* Menyesuaikan min-width untuk layar 768px */
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 0.5rem;
   }
 
   .product-image-wrapper {
-    height: 100px;
+    /* Menyesuaikan tinggi gambar untuk layar 768px */
+    height: 120px;
   }
 
   .category-grid {
@@ -1720,7 +1726,8 @@ input::placeholder {
   }
 
   .products-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)) !important;
+    /* Menyesuaikan min-width untuk layar 767px */
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)) !important;
     gap: 12px;
   }
 }
@@ -1799,11 +1806,13 @@ input::placeholder {
 
 @media (max-width: 480px) {
   .products-grid {
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    /* Menyesuaikan min-width untuk layar 480px */
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   }
 
   .product-image-wrapper {
-    height: 90px;
+    /* Menyesuaikan tinggi gambar untuk layar 480px */
+    height: 110px;
   }
 
   .product-content {
@@ -1850,7 +1859,8 @@ input::placeholder {
   }
 
   .products-grid {
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    /* Menyesuaikan min-width untuk landscape mobile kecil */
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 0.5rem;
   }
 
@@ -1860,7 +1870,8 @@ input::placeholder {
   }
 
   .product-image-wrapper {
-    height: 90px;
+    /* Menyesuaikan tinggi gambar untuk landscape mobile kecil */
+    height: 110px;
   }
 
   .product-content {
