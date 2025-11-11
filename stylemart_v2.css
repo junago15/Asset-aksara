@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
         * {
             box-sizing: border-box;
@@ -531,13 +532,12 @@
                 border-radius: 0;
             }
 
+            /* === PERBAIKAN KODE: Menghapus max-height agar layout flexbox bekerja === */
             .cart-items-container {
-                /* --- PERBAIKAN DIMULAI --- */
-                /* Hapus max-height yang menyebabkan masalah layout */
-                /* max-height: calc(100vh - 140px) !important; */ 
-                /* Biarkan flex: 1 (dari global) dan overflow-y: auto (dari global) bekerja */
-                /* --- PERBAIKAN SELESAI --- */
+                /* max-height: calc(100vh - 140px) !important; */ /* <-- BARIS INI DIHAPUS */
                 padding: 0.5rem;
+                overflow-y: auto;
+                /* tetap bisa scroll kalau item banyak */
             }
 
 
@@ -548,8 +548,6 @@
 
             .cart-total-container {
                 padding: 0.75rem;
-                /* flex-shrink: 0; (sudah ada di global) */
-                /* position: static; (sudah ada di global) */
             }
 
             .cart-item-name,
@@ -915,9 +913,7 @@
             }
         }
 
-        /* --- PERBAIKAN MODAL KERANJANG DIMULAI --- */
-
-        /* Modal Cart Styles - DIUBAH untuk full screen di mobile */
+        /* === PERBAIKAN KODE: Menghapus overflow-y: auto dari modal utama === */
         .cart-modal {
             position: fixed;
             top: 0;
@@ -928,7 +924,7 @@
             box-shadow: -5px 0 15px rgba(0, 0, 0, 0.1);
             transition: right 0.3s ease;
             z-index: 1000;
-            overflow: hidden; /* PERBAIKAN: Ganti dari auto ke hidden */
+            /* overflow-y: auto; */ /* <-- BARIS INI DIHAPUS */
         }
 
         .cart-modal.open {
@@ -950,31 +946,29 @@
             display: block;
         }
 
-        .cart-container {
+        /* === PERBAIKAN KODE: Menghapus .cart-container karena HTML-nya dibuang === */
+        /* .cart-container {
             display: flex;
             flex-direction: column;
-            height: 100%; /* Memastikan container mengisi modal */
-        }
+            height: 100%;
+        } */
 
         .cart-items-container {
-            flex: 1; /* PERBAIKAN: Ini akan mengisi ruang tersisa */
-            overflow-y: auto; /* PERBAIKAN: Hanya area ini yang scroll */
+            flex: 1;
+            overflow-y: auto;
             padding: 1rem;
         }
 
+        /* === PERBAIKAN KODE: Menghapus position: sticky dan properti terkait === */
         .cart-total-container {
-            /* PERBAIKAN: Hapus 'position: sticky' dan 'bottom: 0' */
-            /* position: sticky; */
-            /* bottom: 0; */
-            position: static; /* Pastikan kembali ke default */
-            flex-shrink: 0; /* PERBAIKAN: Pastikan area total tidak menyusut */
+            /* position: sticky; */ /* <-- BARIS INI DIHAPUS */
+            /* bottom: 0; */ /* <-- BARIS INI DIHAPUS */
             background: #fff;
             border-top: 1px solid rgba(109, 40, 217, 0.2);
             padding: 0.75rem;
-            z-index: 10;
+            /* z-index: 10; */ /* <-- BARIS INI DIHAPUS */
+            flex-shrink: 0; /* <-- BARIS INI DITAMBAHKAN untuk memastikan tidak menyusut */
         }
-
-        /* --- PERBAIKAN MODAL KERANJANG SELESAI --- */
 
 
         /* Profile Modal Styles */
@@ -2236,3 +2230,5 @@
             font-size: 0.7rem;
             font-weight: bold;
         }
+
+}
