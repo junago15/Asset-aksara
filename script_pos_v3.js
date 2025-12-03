@@ -93,26 +93,18 @@ async function login(email, password) {
 
         if (authError) {
             console.error('Auth login error:', authError);
+            document.getElementById('emailError').textContent = 'Email atau password salah';
             document.getElementById('emailError').style.display = 'block';
             document.getElementById('passwordError').style.display = 'block';
-            
-            // HANYA tampilkan error, TIDAK tutup modal
-            document.getElementById('loginModal').classList.remove('hidden');
-            document.body.classList.add('overflow-hidden');
-            
             return false;
         }
 
         // 2. Verifikasi email sudah terdaftar di Supabase Auth
         if (!authData.user || !authData.user.email_confirmed_at) {
             console.error('Email not confirmed or user not found');
+            document.getElementById('emailError').textContent = 'Email belum terverifikasi';
             document.getElementById('emailError').style.display = 'block';
             document.getElementById('passwordError').style.display = 'block';
-            
-            // HANYA tampilkan error, TIDAK tutup modal
-            document.getElementById('loginModal').classList.remove('hidden');
-            document.body.classList.add('overflow-hidden');
-            
             await supabase.auth.signOut();
             return false;
         }
@@ -128,13 +120,9 @@ async function login(email, password) {
 
         if (adminError || !adminData) {
             console.error('User not authorized - Not in admin_role or not cashier:', adminError);
+            document.getElementById('emailError').textContent = 'Anda tidak memiliki akses kasir';
             document.getElementById('emailError').style.display = 'block';
             document.getElementById('passwordError').style.display = 'block';
-            
-            // HANYA tampilkan error, TIDAK tutup modal
-            document.getElementById('loginModal').classList.remove('hidden');
-            document.body.classList.add('overflow-hidden');
-            
             await supabase.auth.signOut();
             return false;
         }
@@ -152,12 +140,9 @@ async function login(email, password) {
 
     } catch (error) {
         console.error('Login error:', error);
+        document.getElementById('emailError').textContent = 'Terjadi kesalahan saat login';
         document.getElementById('emailError').style.display = 'block';
         document.getElementById('passwordError').style.display = 'block';
-        
-        // Pastikan modal TETAP TERBUKA saat error
-        document.getElementById('loginModal').classList.remove('hidden');
-        document.body.classList.add('overflow-hidden');
         
         // Pastikan logout jika ada error
         await supabase.auth.signOut().catch(() => {});
@@ -165,13 +150,15 @@ async function login(email, password) {
     }
 }
 
-// Juga perbaiki di checkLoginStatus agar hanya menutup modal jika login sukses
+// Fungsi untuk cek status login
 async function checkLoginStatus() {
     try {
         const { data: { session }, error } = await supabase.auth.getSession();
 
         if (error) {
             console.error('Error checking session:', error);
+            // Tampilkan modal login
+            showLoginModal();
             return;
         }
 
@@ -188,14 +175,12 @@ async function checkLoginStatus() {
             if (adminError || !adminData) {
                 console.error('User not authorized:', adminError);
                 await supabase.auth.signOut();
-                
-                // JANGAN tutup modal jika tidak authorized
-                document.getElementById('loginModal').classList.remove('hidden');
-                document.body.classList.add('overflow-hidden');
+                // Tampilkan modal login
+                showLoginModal();
                 return;
             }
 
-            // Hanya tutup modal jika semua verifikasi berhasil
+            // Login valid - tutup modal dan inisialisasi app
             isLoggedIn = true;
             currentAdmin = adminData;
             document.getElementById('loginModal').classList.add('hidden');
@@ -203,13 +188,14 @@ async function checkLoginStatus() {
             document.getElementById('userName').textContent = adminData.name || session.user.email;
 
             initializeApp(); 
-        } 
+        } else {
+            // Tidak ada session - tampilkan modal login
+            showLoginModal();
+        }
     } catch (error) {
         console.error('Error in checkLoginStatus:', error);
-        
-        // Pastikan modal tetap terbuka saat error
-        document.getElementById('loginModal').classList.remove('hidden');
-        document.body.classList.add('overflow-hidden');
+        // Tampilkan modal login
+        showLoginModal();
     }
 }
 
@@ -228,6 +214,7 @@ async function logout() {
         isLoggedIn = false;
         currentAdmin = null;
 
+        // Cleanup intervals and subscriptions
         if (timeInterval) { clearInterval(timeInterval); timeInterval = null; }
         if (orderBadgeInterval) { clearInterval(orderBadgeInterval); orderBadgeInterval = null; }
         if (productSubscription) { 
@@ -247,12 +234,13 @@ async function logout() {
             orderSubscription = null; 
         }
 
+        // Reset data
         cart = [];
         transactions = [];
         lastTransaction = null;
 
+        // Update UI
         renderCart(); 
-        
         document.getElementById('profileMenu').classList.add('hidden');
         resetLoginButton();
         
@@ -261,10 +249,16 @@ async function logout() {
 
         showNotification('Anda telah logout', 'info');
         renderProducts();
+        
+        // Tampilkan modal login setelah logout
+        setTimeout(() => {
+            showLoginModal();
+        }, 300);
 
     } catch (error) {
         console.error('Logout error:', error);
         resetLoginButton();
+        showNotification('Gagal logout', 'error');
     }
 }
 
@@ -306,16 +300,20 @@ document.getElementById('loginForm').addEventListener('submit', async function (
     document.getElementById('emailError').style.display = 'none';
     document.getElementById('passwordError').style.display = 'none';
 
-    setTimeout(async () => {
-        const email = document.getElementById('email').value;
-        const password = document.getElementById('password').value;
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
 
-        const success = await login(email, password);
+    const success = await login(email, password);
 
-        if (!success) {
-            resetLoginButton();
+    if (!success) {
+        // Reset tombol login tapi JANGAN tutup modal
+        resetLoginButton();
+        // Pastikan modal tetap terbuka dengan memanggil showLoginModal jika diperlukan
+        if (document.getElementById('loginModal').classList.contains('hidden')) {
+            showLoginModal();
         }
-    }, 1000);
+    }
+    // Jika success = true, modal sudah ditutup di fungsi login()
 });
 
 document.getElementById('logoutBtn').addEventListener('click', function (e) {
