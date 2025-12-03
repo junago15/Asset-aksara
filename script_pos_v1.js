@@ -46,11 +46,13 @@ async function checkLoginStatus() {
         }
 
         if (session && session.user) {
+            // Cek apakah email ada di tabel admin_role dengan status active dan role cashier
             const { data: adminData, error: adminError } = await supabase
                 .from('admin_role')
                 .select('email, name, status, role')
                 .eq('email', session.user.email)
                 .eq('status', 'active')
+                .eq('role', 'cashier')
                 .single();
 
             if (adminError || !adminData) {
@@ -77,61 +79,137 @@ function showLoginModal() {
     document.body.classList.add('overflow-hidden');
 }
 
-
 // Fungsi untuk login dengan Supabase Auth
 async function login(email, password) {
     try {
         document.getElementById('emailError').style.display = 'none';
         document.getElementById('passwordError').style.display = 'none';
 
-        const { data, error } = await supabase.auth.signInWithPassword({
+        // 1. Login dengan Supabase Auth
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
             email: email,
             password: password
         });
 
-        if (error) {
-            console.error('Login error:', error);
+        if (authError) {
+            console.error('Auth login error:', authError);
             document.getElementById('emailError').style.display = 'block';
             document.getElementById('passwordError').style.display = 'block';
+            
+            // HANYA tampilkan error, TIDAK tutup modal
+            document.getElementById('loginModal').classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+            
             return false;
         }
 
-        if (data.user && data.user.email_confirmed_at) {
-            const { data: adminData, error: adminError } = await supabase
-                .from('admin_role')
-                .select('email, name, status, role')
-                .eq('email', data.user.email)
-                .eq('status', 'active')
-                .single();
-
-            if (adminError || !adminData) {
-                console.error('User not authorized:', adminError);
-                document.getElementById('emailError').style.display = 'block';
-                document.getElementById('passwordError').style.display = 'block';
-                await supabase.auth.signOut();
-                return false;
-            }
-
-            isLoggedIn = true;
-            currentAdmin = adminData;
-            document.getElementById('loginModal').classList.add('hidden');
-            document.body.classList.remove('overflow-hidden');
-            document.getElementById('userName').textContent = adminData.name || data.user.email;
-            showNotification(`Login berhasil! Selamat datang ${adminData.name || data.user.email}`, 'success');
-
-            initializeApp();
-            return true;
-        } else {
+        // 2. Verifikasi email sudah terdaftar di Supabase Auth
+        if (!authData.user || !authData.user.email_confirmed_at) {
+            console.error('Email not confirmed or user not found');
             document.getElementById('emailError').style.display = 'block';
             document.getElementById('passwordError').style.display = 'block';
+            
+            // HANYA tampilkan error, TIDAK tutup modal
+            document.getElementById('loginModal').classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+            
             await supabase.auth.signOut();
             return false;
         }
+
+        // 3. Cek apakah email ada di tabel admin_role dengan status active dan role cashier
+        const { data: adminData, error: adminError } = await supabase
+            .from('admin_role')
+            .select('email, name, status, role')
+            .eq('email', authData.user.email)
+            .eq('status', 'active')
+            .eq('role', 'cashier')
+            .single();
+
+        if (adminError || !adminData) {
+            console.error('User not authorized - Not in admin_role or not cashier:', adminError);
+            document.getElementById('emailError').style.display = 'block';
+            document.getElementById('passwordError').style.display = 'block';
+            
+            // HANYA tampilkan error, TIDAK tutup modal
+            document.getElementById('loginModal').classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+            
+            await supabase.auth.signOut();
+            return false;
+        }
+
+        // 4. Login berhasil - BARU SAAT INI TUTUP MODAL
+        isLoggedIn = true;
+        currentAdmin = adminData;
+        document.getElementById('loginModal').classList.add('hidden');
+        document.body.classList.remove('overflow-hidden');
+        document.getElementById('userName').textContent = adminData.name || authData.user.email;
+        showNotification(`Login berhasil! Selamat datang ${adminData.name || authData.user.email}`, 'success');
+
+        initializeApp();
+        return true;
+
     } catch (error) {
         console.error('Login error:', error);
         document.getElementById('emailError').style.display = 'block';
         document.getElementById('passwordError').style.display = 'block';
+        
+        // Pastikan modal TETAP TERBUKA saat error
+        document.getElementById('loginModal').classList.remove('hidden');
+        document.body.classList.add('overflow-hidden');
+        
+        // Pastikan logout jika ada error
+        await supabase.auth.signOut().catch(() => {});
         return false;
+    }
+}
+
+// Juga perbaiki di checkLoginStatus agar hanya menutup modal jika login sukses
+async function checkLoginStatus() {
+    try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+
+        if (error) {
+            console.error('Error checking session:', error);
+            return;
+        }
+
+        if (session && session.user) {
+            // Cek apakah email ada di tabel admin_role dengan status active dan role cashier
+            const { data: adminData, error: adminError } = await supabase
+                .from('admin_role')
+                .select('email, name, status, role')
+                .eq('email', session.user.email)
+                .eq('status', 'active')
+                .eq('role', 'cashier')
+                .single();
+
+            if (adminError || !adminData) {
+                console.error('User not authorized:', adminError);
+                await supabase.auth.signOut();
+                
+                // JANGAN tutup modal jika tidak authorized
+                document.getElementById('loginModal').classList.remove('hidden');
+                document.body.classList.add('overflow-hidden');
+                return;
+            }
+
+            // Hanya tutup modal jika semua verifikasi berhasil
+            isLoggedIn = true;
+            currentAdmin = adminData;
+            document.getElementById('loginModal').classList.add('hidden');
+            document.body.classList.remove('overflow-hidden');
+            document.getElementById('userName').textContent = adminData.name || session.user.email;
+
+            initializeApp(); 
+        } 
+    } catch (error) {
+        console.error('Error in checkLoginStatus:', error);
+        
+        // Pastikan modal tetap terbuka saat error
+        document.getElementById('loginModal').classList.remove('hidden');
+        document.body.classList.add('overflow-hidden');
     }
 }
 
@@ -152,8 +230,22 @@ async function logout() {
 
         if (timeInterval) { clearInterval(timeInterval); timeInterval = null; }
         if (orderBadgeInterval) { clearInterval(orderBadgeInterval); orderBadgeInterval = null; }
-        if (productSubscription) { await supabase.removeChannel(productSubscription); productSubscription = null; }
-        if (orderSubscription) { await supabase.removeChannel(orderSubscription); orderSubscription = null; }
+        if (productSubscription) { 
+            try { 
+                await supabase.removeChannel(productSubscription); 
+            } catch (e) {
+                console.warn('Error removing product subscription:', e);
+            }
+            productSubscription = null; 
+        }
+        if (orderSubscription) { 
+            try { 
+                await supabase.removeChannel(orderSubscription); 
+            } catch (e) {
+                console.warn('Error removing order subscription:', e);
+            }
+            orderSubscription = null; 
+        }
 
         cart = [];
         transactions = [];
@@ -506,7 +598,6 @@ function handleDocumentClick(e) {
         searchInfo.classList.add('hidden');
     }
 }
-
 
 function setupEventListeners() {
     if (listenersInitialized) return;
@@ -1651,7 +1742,6 @@ function showQrisPreviewModal(order) {
     const newConfirmBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
 
-
     const cleanup = () => {
         previewModal.classList.add('hidden');
         previewModal.classList.remove('flex');
@@ -1788,7 +1878,6 @@ async function renderTransactionHistory(searchTerm = '') {
     }
 }
 
-
 async function handleViewReceipt(ordersNumber) {
     const onlineOrdersMenu = document.getElementById('onlineOrdersMenu');
     if (onlineOrdersMenu && onlineOrdersMenu.classList.contains('show')) {
@@ -1800,9 +1889,6 @@ async function handleViewReceipt(ordersNumber) {
     await viewTransactionReceiptFromDB(ordersNumber);
 }
 
-// =============================================
-// Fungsi untuk melihat struk transaksi dari DB (HISTORY/REPRINT)
-// =============================================
 async function viewTransactionReceiptFromDB(ordersNumber) {
     if (!isLoggedIn) {
         showLoginModal();
@@ -1846,7 +1932,6 @@ async function viewTransactionReceiptFromDB(ordersNumber) {
     document.getElementById('receiptModal').classList.add('flex');
 }
 
-// ====== Generate Receipt dari Database ======
 function generateReceiptFromDB(order, orderItems, deliveryFee = 0) {
     const receiptContent = document.getElementById('receiptContent');
     const subtotal = order.subtotal;
@@ -1885,14 +1970,10 @@ function generateReceiptFromDB(order, orderItems, deliveryFee = 0) {
         return unique.length ? unique[0] : 'Ambil Sendiri';
     })();
 
-    // Cek apakah status pengiriman "Diantar" (case insensitive)
     const isDelivered = deliveryOption.toLowerCase().includes('diantar');
     
-    // --- PERBAIKAN LOGIKA TEMPAT ---
-    // Hanya tampilkan jika "Diantar" DAN data tempat ada
     const rawPlace = orderItems[0]?.place;
     const place = (isDelivered && rawPlace) ? rawPlace : '';
-    // --- Akhir Perbaikan ---
 
     receiptContent.innerHTML = `
     <div class="text-center mb-3">
@@ -2056,7 +2137,6 @@ if ('serviceWorker' in navigator) {
         .catch(err => console.error("SW registration failed:", err));
 }
 
-
 function showQrisFullscreen(imageSrc) {
     const fullscreenModal = document.getElementById('qrisFullscreenModal');
     const fullscreenImage = document.getElementById('qrisFullscreenImage');
@@ -2098,7 +2178,6 @@ document.addEventListener('DOMContentLoaded', function () {
         };
     }
 });
-
 
 window.addEventListener('scroll', () => {
     const glass = document.querySelector('.sticky-search-section .glass-effect');
